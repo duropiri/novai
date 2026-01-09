@@ -553,7 +553,7 @@ REDIS_PORT=6379
 REDIS_PASSWORD=
 
 # App
-NEXT_PUBLIC_API_URL=http://localhost:3001
+NEXT_PUBLIC_API_URL=http://localhost:3001/api
 ```
 
 ---
