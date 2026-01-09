@@ -1,5 +1,10 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
+// Track if API is available to reduce noise
+let apiAvailable = true;
+let lastApiCheck = 0;
+const API_CHECK_INTERVAL = 30000; // 30 seconds
+
 // Custom API error with additional context
 export class ApiError extends Error {
   constructor(
@@ -10,6 +15,11 @@ export class ApiError extends Error {
   ) {
     super(message);
     this.name = 'ApiError';
+  }
+
+  // Check if this is a "not configured" error that should be silent
+  isNotConfigured(): boolean {
+    return this.statusCode === 0 || this.statusCode === 404 || this.details?.includes('not configured') === true;
   }
 }
 
@@ -61,6 +71,17 @@ async function fetchApi<T>(
   options: RequestInit = {}
 ): Promise<T> {
   const url = `${API_BASE_URL}${endpoint}`;
+  const isGetRequest = !options.method || options.method === 'GET';
+
+  // For GET requests, skip if API was recently unavailable
+  if (isGetRequest && !apiAvailable && Date.now() - lastApiCheck < API_CHECK_INTERVAL) {
+    throw new ApiError(
+      'API not available',
+      0,
+      endpoint,
+      'API unavailable - skipping request'
+    );
+  }
 
   try {
     const response = await fetch(url, {
@@ -70,6 +91,9 @@ async function fetchApi<T>(
         ...options.headers,
       },
     });
+
+    // API is responding
+    apiAvailable = true;
 
     if (!response.ok) {
       const details = await parseErrorResponse(response);
@@ -84,6 +108,8 @@ async function fetchApi<T>(
     }
     // Handle network errors
     if (error instanceof TypeError && error.message === 'Failed to fetch') {
+      apiAvailable = false;
+      lastApiCheck = Date.now();
       throw new ApiError(
         'Unable to connect to the server. Please check your connection.',
         0,
@@ -92,6 +118,19 @@ async function fetchApi<T>(
       );
     }
     throw error;
+  }
+}
+
+// Wrapper for GET requests that returns fallback on error (silent failures)
+async function fetchApiSilent<T>(
+  endpoint: string,
+  fallback: T
+): Promise<T> {
+  try {
+    return await fetchApi<T>(endpoint);
+  } catch {
+    // Silent failure - return fallback value
+    return fallback;
   }
 }
 
@@ -129,7 +168,7 @@ export interface UploadLoraRequest {
 
 export const loraApi = {
   list: (status?: string) =>
-    fetchApi<LoraModel[]>(`/lora${status ? `?status=${status}` : ''}`),
+    fetchApiSilent<LoraModel[]>(`/lora${status ? `?status=${status}` : ''}`, []),
 
   get: (id: string) => fetchApi<LoraModel>(`/lora/${id}`),
 
@@ -235,7 +274,7 @@ export interface CreateCharacterDiagramRequest {
 
 export const characterApi = {
   list: (status?: string) =>
-    fetchApi<CharacterDiagram[]>(`/characters${status ? `?status=${status}` : ''}`),
+    fetchApiSilent<CharacterDiagram[]>(`/characters${status ? `?status=${status}` : ''}`, []),
 
   get: (id: string) => fetchApi<CharacterDiagram>(`/characters/${id}`),
 
@@ -269,7 +308,7 @@ export interface CreateCollectionRequest {
 
 export const collectionsApi = {
   list: (type?: 'video' | 'audio') =>
-    fetchApi<Collection[]>(`/collections${type ? `?type=${type}` : ''}`),
+    fetchApiSilent<Collection[]>(`/collections${type ? `?type=${type}` : ''}`, []),
 
   get: (id: string) => fetchApi<Collection>(`/collections/${id}`),
 
@@ -291,10 +330,10 @@ export const collectionsApi = {
     }),
 
   getVideos: (collectionId: string) =>
-    fetchApi<Video[]>(`/collections/${collectionId}/videos`),
+    fetchApiSilent<Video[]>(`/collections/${collectionId}/videos`, []),
 
   getAudioFiles: (collectionId: string) =>
-    fetchApi<AudioFile[]>(`/collections/${collectionId}/audio`),
+    fetchApiSilent<AudioFile[]>(`/collections/${collectionId}/audio`, []),
 };
 
 // Videos API
@@ -332,7 +371,7 @@ export const videosApi = {
     if (options?.type) params.append('type', options.type);
     if (options?.collectionId) params.append('collectionId', options.collectionId);
     const query = params.toString();
-    return fetchApi<Video[]>(`/videos${query ? `?${query}` : ''}`);
+    return fetchApiSilent<Video[]>(`/videos${query ? `?${query}` : ''}`, []);
   },
 
   get: (id: string) => fetchApi<Video>(`/videos/${id}`),
@@ -377,7 +416,7 @@ export interface CreateAudioFileRequest {
 export const audioApi = {
   list: (collectionId?: string) => {
     const params = collectionId ? `?collectionId=${collectionId}` : '';
-    return fetchApi<AudioFile[]>(`/audio${params}`);
+    return fetchApiSilent<AudioFile[]>(`/audio${params}`, []);
   },
 
   get: (id: string) => fetchApi<AudioFile>(`/audio/${id}`),
@@ -416,7 +455,7 @@ export interface CreateHookRequest {
 export const hooksApi = {
   list: (category?: string) => {
     const params = category ? `?category=${category}` : '';
-    return fetchApi<Hook[]>(`/hooks${params}`);
+    return fetchApiSilent<Hook[]>(`/hooks${params}`, []);
   },
 
   get: (id: string) => fetchApi<Hook>(`/hooks/${id}`),
@@ -444,7 +483,7 @@ export const hooksApi = {
       method: 'DELETE',
     }),
 
-  getCategories: () => fetchApi<string[]>('/hooks/categories'),
+  getCategories: () => fetchApiSilent<string[]>('/hooks/categories', []),
 };
 
 // Jobs API
@@ -500,7 +539,7 @@ export const swapApi = {
 
   getResult: (jobId: string) => fetchApi<Video>(`/swap/results/${jobId}`),
 
-  getHistory: () => fetchApi<Video[]>('/swap/history'),
+  getHistory: () => fetchApiSilent<Video[]>('/swap/history', []),
 };
 
 // Variants API
@@ -583,12 +622,34 @@ export interface DashboardStats {
   };
 }
 
+// Empty stats fallback for when API is unavailable
+const EMPTY_STATS: DashboardStats = {
+  storage: {
+    videos: { count: 0, totalSizeBytes: 0 },
+    audio: { count: 0, totalSizeBytes: 0 },
+    loraModels: { count: 0 },
+    characterDiagrams: { count: 0 },
+    hooks: { count: 0 },
+    collections: { video: 0, audio: 0 },
+  },
+  costs: {
+    today: 0,
+    thisMonth: 0,
+    byType: {},
+  },
+  jobs: {
+    active: 0,
+    completedToday: 0,
+    failedToday: 0,
+  },
+};
+
 export const statsApi = {
-  getDashboardStats: () => fetchApi<DashboardStats>('/stats'),
+  getDashboardStats: () => fetchApiSilent<DashboardStats>('/stats', EMPTY_STATS),
 
-  getActiveJobs: () => fetchApi<Job[]>('/stats/jobs/active'),
+  getActiveJobs: () => fetchApiSilent<Job[]>('/stats/jobs/active', []),
 
-  getRecentJobs: (limit = 10) => fetchApi<Job[]>(`/stats/jobs/recent?limit=${limit}`),
+  getRecentJobs: (limit = 10) => fetchApiSilent<Job[]>(`/stats/jobs/recent?limit=${limit}`, []),
 };
 
 // Settings API
@@ -613,7 +674,7 @@ export interface ApiKeyTestResult {
 }
 
 export const settingsApi = {
-  getAll: () => fetchApi<Setting[]>('/settings'),
+  getAll: () => fetchApiSilent<Setting[]>('/settings', []),
 
   get: (key: string) => fetchApi<Setting>(`/settings/${key}`),
 
