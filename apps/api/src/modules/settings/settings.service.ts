@@ -26,6 +26,12 @@ export class SettingsService {
     private readonly configService: ConfigService,
   ) {}
 
+  private checkInitialized(): void {
+    if (!this.supabase.isInitialized()) {
+      throw new Error('Database not configured. Please set up Supabase credentials in your .env file.');
+    }
+  }
+
   /**
    * Get all settings (secrets are masked)
    */
@@ -54,6 +60,9 @@ export class SettingsService {
    * Get a single setting by key
    */
   async getSetting(key: string): Promise<Setting | null> {
+    if (!this.supabase.isInitialized()) {
+      return null;
+    }
     const client = this.supabase.getClient();
     const { data, error } = await client
       .from('settings')
@@ -77,20 +86,23 @@ export class SettingsService {
    * Falls back to environment variable if database value is empty
    */
   async getSettingValue(key: string): Promise<string | null> {
-    const client = this.supabase.getClient();
-    const { data, error } = await client
-      .from('settings')
-      .select('value')
-      .eq('key', key)
-      .single();
+    // If database is configured, try to get from there first
+    if (this.supabase.isInitialized()) {
+      const client = this.supabase.getClient();
+      const { data, error } = await client
+        .from('settings')
+        .select('value')
+        .eq('key', key)
+        .single();
 
-    if (error && error.code !== 'PGRST116') {
-      this.logger.warn(`Failed to get setting ${key}: ${error.message}`);
-    }
+      if (error && error.code !== 'PGRST116') {
+        this.logger.warn(`Failed to get setting ${key}: ${error.message}`);
+      }
 
-    // If database has a value, use it
-    if (data?.value) {
-      return data.value;
+      // If database has a value, use it
+      if (data?.value) {
+        return data.value;
+      }
     }
 
     // Fall back to environment variable
@@ -101,6 +113,7 @@ export class SettingsService {
    * Update a setting value
    */
   async updateSetting(key: string, value: string): Promise<Setting> {
+    this.checkInitialized();
     const client = this.supabase.getClient();
 
     // Check if setting exists
