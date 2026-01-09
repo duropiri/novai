@@ -103,8 +103,21 @@ export class SupabaseService implements OnModuleInit {
     const supabaseUrl = this.configService.get<string>('SUPABASE_URL');
     const supabaseKey = this.configService.get<string>('SUPABASE_SERVICE_ROLE_KEY');
 
+    // Check if credentials are missing or still placeholder values
     if (!supabaseUrl || !supabaseKey) {
       this.logger.warn('Supabase credentials not configured. Database operations will fail.');
+      return;
+    }
+
+    // Check for placeholder values that indicate unconfigured state
+    if (
+      supabaseUrl.includes('your-project-id') ||
+      supabaseUrl.includes('xxx') ||
+      supabaseKey.includes('your-') ||
+      supabaseKey === 'your-service-role-key-here' ||
+      supabaseKey === 'your-anon-key-here'
+    ) {
+      this.logger.warn('Supabase credentials appear to be placeholder values. Please configure real credentials.');
       return;
     }
 
