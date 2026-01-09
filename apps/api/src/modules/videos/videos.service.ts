@@ -18,7 +18,14 @@ export class VideosService {
 
   constructor(private readonly supabase: SupabaseService) {}
 
+  private checkInitialized(): void {
+    if (!this.supabase.isInitialized()) {
+      throw new Error('Database not configured. Please set up Supabase credentials.');
+    }
+  }
+
   async create(dto: CreateVideoDto): Promise<DbVideo> {
+    this.checkInitialized();
     this.logger.log(`Creating video: ${dto.name}`);
 
     return this.supabase.createVideo({
@@ -37,18 +44,26 @@ export class VideosService {
   }
 
   async findAll(options?: { type?: string; collectionId?: string }): Promise<DbVideo[]> {
+    if (!this.supabase.isInitialized()) {
+      return [];
+    }
     return this.supabase.listVideos(options);
   }
 
   async findOne(id: string): Promise<DbVideo | null> {
+    if (!this.supabase.isInitialized()) {
+      return null;
+    }
     return this.supabase.getVideo(id);
   }
 
   async update(id: string, updates: Partial<Pick<DbVideo, 'name' | 'collection_id'>>): Promise<DbVideo> {
+    this.checkInitialized();
     return this.supabase.updateVideo(id, updates);
   }
 
   async delete(id: string): Promise<void> {
+    this.checkInitialized();
     const video = await this.supabase.getVideo(id);
     if (!video) {
       throw new Error('Video not found');

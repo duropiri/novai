@@ -15,7 +15,14 @@ export class AudioService {
 
   constructor(private readonly supabase: SupabaseService) {}
 
+  private checkInitialized(): void {
+    if (!this.supabase.isInitialized()) {
+      throw new Error('Database not configured. Please set up Supabase credentials.');
+    }
+  }
+
   async create(dto: CreateAudioFileDto): Promise<DbAudioFile> {
+    this.checkInitialized();
     this.logger.log(`Creating audio file: ${dto.name}`);
 
     return this.supabase.createAudioFile({
@@ -28,18 +35,26 @@ export class AudioService {
   }
 
   async findAll(collectionId?: string): Promise<DbAudioFile[]> {
+    if (!this.supabase.isInitialized()) {
+      return [];
+    }
     return this.supabase.listAudioFiles(collectionId);
   }
 
   async findOne(id: string): Promise<DbAudioFile | null> {
+    if (!this.supabase.isInitialized()) {
+      return null;
+    }
     return this.supabase.getAudioFile(id);
   }
 
   async update(id: string, updates: Partial<Pick<DbAudioFile, 'name' | 'collection_id'>>): Promise<DbAudioFile> {
+    this.checkInitialized();
     return this.supabase.updateAudioFile(id, updates);
   }
 
   async delete(id: string): Promise<void> {
+    this.checkInitialized();
     const audio = await this.supabase.getAudioFile(id);
     if (!audio) {
       throw new Error('Audio file not found');

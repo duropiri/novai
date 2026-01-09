@@ -20,7 +20,14 @@ export class CharacterService {
     @InjectQueue(QUEUES.CHARACTER_DIAGRAM) private readonly characterQueue: Queue,
   ) {}
 
+  private checkInitialized(): void {
+    if (!this.supabase.isInitialized()) {
+      throw new Error('Database not configured. Please set up Supabase credentials.');
+    }
+  }
+
   async create(dto: CreateCharacterDiagramDto): Promise<DbCharacterDiagram> {
+    this.checkInitialized();
     // Generate name if not provided
     const name = dto.name?.trim() || `Character ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
 
@@ -56,14 +63,21 @@ export class CharacterService {
   }
 
   async findAll(status?: string): Promise<DbCharacterDiagram[]> {
+    if (!this.supabase.isInitialized()) {
+      return [];
+    }
     return this.supabase.listCharacterDiagrams(status);
   }
 
   async findOne(id: string): Promise<DbCharacterDiagram | null> {
+    if (!this.supabase.isInitialized()) {
+      return null;
+    }
     return this.supabase.getCharacterDiagram(id);
   }
 
   async delete(id: string): Promise<void> {
+    this.checkInitialized();
     const diagram = await this.supabase.getCharacterDiagram(id);
     if (!diagram) {
       throw new Error('Character diagram not found');

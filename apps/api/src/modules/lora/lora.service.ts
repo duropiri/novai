@@ -31,7 +31,14 @@ export class LoraService {
     @InjectQueue(QUEUES.LORA_TRAINING) private readonly loraQueue: Queue,
   ) {}
 
+  private checkInitialized(): void {
+    if (!this.supabase.isInitialized()) {
+      throw new Error('Database not configured. Please set up Supabase credentials.');
+    }
+  }
+
   async create(dto: CreateLoraDto): Promise<DbLoraModel> {
+    this.checkInitialized();
     this.logger.log(`Creating LoRA model: ${dto.name}`);
 
     // Create the LoRA model record
@@ -70,6 +77,7 @@ export class LoraService {
   }
 
   async uploadManual(dto: UploadLoraDto): Promise<DbLoraModel> {
+    this.checkInitialized();
     this.logger.log(`Uploading manual LoRA model: ${dto.name}`);
 
     // Generate a UUID for the model
@@ -118,10 +126,16 @@ export class LoraService {
   }
 
   async findAll(status?: string): Promise<DbLoraModel[]> {
+    if (!this.supabase.isInitialized()) {
+      return [];
+    }
     return this.supabase.listLoraModels(status);
   }
 
   async findOne(id: string): Promise<DbLoraModel | null> {
+    if (!this.supabase.isInitialized()) {
+      return null;
+    }
     return this.supabase.getLoraModel(id);
   }
 
@@ -138,6 +152,7 @@ export class LoraService {
   }
 
   async delete(id: string): Promise<void> {
+    this.checkInitialized();
     const model = await this.supabase.getLoraModel(id);
     if (!model) {
       throw new Error('LoRA model not found');

@@ -17,7 +17,14 @@ export class CollectionsService {
 
   constructor(private readonly supabase: SupabaseService) {}
 
+  private checkInitialized(): void {
+    if (!this.supabase.isInitialized()) {
+      throw new Error('Database not configured. Please set up Supabase credentials.');
+    }
+  }
+
   async create(dto: CreateCollectionDto): Promise<DbCollection> {
+    this.checkInitialized();
     this.logger.log(`Creating ${dto.type} collection: ${dto.name}`);
     return this.supabase.createCollection({
       name: dto.name,
@@ -26,6 +33,9 @@ export class CollectionsService {
   }
 
   async findAll(type?: 'video' | 'audio'): Promise<CollectionWithStats[]> {
+    if (!this.supabase.isInitialized()) {
+      return [];
+    }
     const collections = await this.supabase.listCollections(type);
 
     // Get stats for each collection
@@ -56,6 +66,9 @@ export class CollectionsService {
   }
 
   async findOne(id: string): Promise<CollectionWithStats | null> {
+    if (!this.supabase.isInitialized()) {
+      return null;
+    }
     const collection = await this.supabase.getCollection(id);
     if (!collection) return null;
 
@@ -80,11 +93,13 @@ export class CollectionsService {
   }
 
   async update(id: string, name: string): Promise<DbCollection> {
+    this.checkInitialized();
     this.logger.log(`Updating collection ${id}: ${name}`);
     return this.supabase.updateCollection(id, { name });
   }
 
   async delete(id: string): Promise<void> {
+    this.checkInitialized();
     const collection = await this.supabase.getCollection(id);
     if (!collection) {
       throw new Error('Collection not found');
@@ -109,11 +124,17 @@ export class CollectionsService {
 
   // Get videos in a collection
   async getVideos(collectionId: string): Promise<DbVideo[]> {
+    if (!this.supabase.isInitialized()) {
+      return [];
+    }
     return this.supabase.listVideos({ collectionId });
   }
 
   // Get audio files in a collection
   async getAudioFiles(collectionId: string): Promise<DbAudioFile[]> {
+    if (!this.supabase.isInitialized()) {
+      return [];
+    }
     return this.supabase.listAudioFiles(collectionId);
   }
 }

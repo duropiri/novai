@@ -30,6 +30,9 @@ export class SettingsService {
    * Get all settings (secrets are masked)
    */
   async getAllSettings(): Promise<Setting[]> {
+    if (!this.supabase.isInitialized()) {
+      return [];
+    }
     const client = this.supabase.getClient();
     const { data, error } = await client
       .from('settings')
