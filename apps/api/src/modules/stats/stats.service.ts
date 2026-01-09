@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { SupabaseService } from '../files/supabase.service';
 
 export interface DashboardStats {
@@ -22,12 +22,42 @@ export interface DashboardStats {
   };
 }
 
+const EMPTY_STATS: DashboardStats = {
+  storage: {
+    videos: { count: 0, totalSizeBytes: 0 },
+    audio: { count: 0, totalSizeBytes: 0 },
+    loraModels: { count: 0 },
+    characterDiagrams: { count: 0 },
+    hooks: { count: 0 },
+    collections: { video: 0, audio: 0 },
+  },
+  costs: {
+    today: 0,
+    thisMonth: 0,
+    byType: {},
+  },
+  jobs: {
+    active: 0,
+    completedToday: 0,
+    failedToday: 0,
+  },
+};
+
 @Injectable()
 export class StatsService {
+  private readonly logger = new Logger(StatsService.name);
+
   constructor(private readonly supabaseService: SupabaseService) {}
 
   async getDashboardStats(): Promise<DashboardStats> {
-    const storage = await this.supabaseService.getStorageStats();
+    // Return empty stats if Supabase is not initialized
+    if (!this.supabaseService.isInitialized()) {
+      this.logger.warn('Supabase not initialized, returning empty stats');
+      return EMPTY_STATS;
+    }
+
+    try {
+      const storage = await this.supabaseService.getStorageStats();
 
     // Get today's costs
     const today = new Date();
@@ -68,13 +98,33 @@ export class StatsService {
         failedToday,
       },
     };
+    } catch (error) {
+      this.logger.error('Failed to get dashboard stats', error);
+      return EMPTY_STATS;
+    }
   }
 
   async getActiveJobs() {
-    return this.supabaseService.getActiveJobs();
+    if (!this.supabaseService.isInitialized()) {
+      return [];
+    }
+    try {
+      return await this.supabaseService.getActiveJobs();
+    } catch (error) {
+      this.logger.error('Failed to get active jobs', error);
+      return [];
+    }
   }
 
   async getRecentJobs(limit = 10) {
-    return this.supabaseService.getRecentJobs(limit);
+    if (!this.supabaseService.isInitialized()) {
+      return [];
+    }
+    try {
+      return await this.supabaseService.getRecentJobs(limit);
+    } catch (error) {
+      this.logger.error('Failed to get recent jobs', error);
+      return [];
+    }
   }
 }
