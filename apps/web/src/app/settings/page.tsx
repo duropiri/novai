@@ -37,16 +37,9 @@ const API_KEYS: ApiKeyConfig[] = [
   {
     key: 'FAL_API_KEY',
     label: 'fal.ai API',
-    description: 'Used for LoRA model training. Pay-as-you-go pricing (~$2/training).',
+    description: 'Used for LoRA training and face swap video generation. Pay-as-you-go pricing.',
     signupUrl: 'https://fal.ai/dashboard/keys',
     placeholder: 'fal_...',
-  },
-  {
-    key: 'PICSI_API_KEY',
-    label: 'Picsi.ai API',
-    description: 'Used for face swap processing. Requires B2B API access.',
-    signupUrl: 'https://www.picsi.ai',
-    placeholder: 'pk_...',
   },
 ];
 

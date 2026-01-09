@@ -23,32 +23,33 @@ We use the **actual source models** directly, not wrapper platforms.
 
 | Feature | Model | API Provider | Cost | Notes |
 |---------|-------|--------------|------|-------|
-| **LoRA Training** | Wan 2.2 14B | fal.ai | ~$4.50/LoRA | `fal-ai/wan-22-image-trainer` |
+| **LoRA Training** | WAN 2.2 14B | fal.ai | ~$4.50/LoRA | `fal-ai/wan-22-image-trainer` |
 | **Character Diagram** | Gemini 3.0 Pro Image | Google Gemini API | ~$0.02/image | Model: `gemini-3-pro-image-preview` |
-| **Face Swap** | InsightFace INSwapper | Picsi.ai B2B API | 2 credits/sec video | Official InsightFace team |
+| **Face Swap / Video** | WAN | fal.ai | Variable | Uses trained LoRA for identity transfer |
 | **Video Upscaling** | Real-ESRGAN | Replicate | ~$0.01/image | Alternative to Topaz (no API) |
 | **Variant Generation** | FFmpeg | Local | Free | Text overlay, audio replacement |
 
 **Why these choices:**
-- **fal.ai** is the source for Wan 2.2 LoRA training (not a wrapper)
+- **fal.ai WAN** handles both LoRA training AND video generation with identity transfer
 - **Google Gemini** is the actual model behind "Nano Banana Pro" (Higgsfield just wraps it)
-- **Picsi.ai** is the official InsightFace team offering INSwapper B2B API
 - **Topaz Video AI** has no public API — use Real-ESRGAN as alternative
 
 ---
 
 ## Understanding the LoRA → Face Swap Workflow
 
-**Important:** LoRA is NOT fed directly into face swap. The workflow is:
+**Important:** WAN uses the trained LoRA directly for identity-preserving video generation.
 
 ```
-1. Train LoRA on model photos → captures identity for consistent generation
-2. Generate Character Diagram using source photo (LoRA can enhance consistency)
-3. Face Swap uses the character diagram's FACE CLOSEUP as source
-   └── InsightFace doesn't accept LoRAs — it uses the face image only
+1. Train LoRA on model photos → captures identity (face, features, style)
+2. Generate Character Diagram using source photo → provides pose/outfit reference
+3. Face Swap uses ALL THREE inputs:
+   └── Source Video: The video to transform
+   └── Character Diagram: Pose and appearance reference
+   └── LoRA: Identity (face) to apply via WAN model
 ```
 
-The LoRA's purpose is **upstream identity consistency**, not direct face swap input.
+The LoRA is a **required input** that WAN uses to maintain identity consistency in the output video.
 
 ---
 
@@ -245,12 +246,13 @@ Footwear Rules:
 ---
 
 ### ✅ Phase 4: AI Swapper (Face Swap)
-> **Goal:** Face-swap videos using Picsi.ai (InsightFace) API
+> **Goal:** Face-swap videos using fal.ai WAN API with trained LoRA
 
 **How It Works:**
-- Source Video: The viral/template video to swap face onto
-- Target Face: The face closeup portion of the character diagram
-- Output: Video with swapped face
+- Source Video: The viral/template video to transform
+- Character Diagram: Provides pose and appearance reference
+- LoRA: Provides identity (face) to apply — **REQUIRED**
+- Output: Video with identity-transferred face
 
 **UI Layout:** Two-column layout
 - Left column: Stacked selection boxes + Generate button
@@ -259,56 +261,54 @@ Footwear Rules:
 **Left Column - Stacked Selectors:**
 ```
 ┌─────────────────────────────┐
-│ 1. Select Source Video      │  ← Video to swap face onto
+│ 1. Select Source Video      │  ← Video to transform
 │    [Dropdown/grid picker]   │
 │    [Video preview]          │
 ├─────────────────────────────┤
-│ 2. Select Character Diagram │  ← Provides the face to swap in
+│ 2. Select Character Diagram │  ← Pose/appearance reference
 │    [Grid of diagrams]       │
 │    [Selected preview]       │
 ├─────────────────────────────┤
-│ 3. Select LoRA (Optional)   │  ← Future enhancement
-│    [Disabled: "Coming soon"]│
-│    [Note: LoRA enhances     │
-│     upstream generation,    │
-│     not direct swap input]  │
+│ 3. Select LoRA (REQUIRED)   │  ← Identity to apply
+│    [Grid of trained LoRAs]  │
+│    [Selected preview]       │
 ├─────────────────────────────┤
-│ Cost: ~$X.XX (2 credits/sec)│
+│ Cost: ~$X.XX (variable)     │
 ├─────────────────────────────┤
 │ [    Generate Face Swap   ] │
 └─────────────────────────────┘
 ```
 
-**API: Picsi.ai B2B API (InsightFace)**
+**API: fal.ai WAN**
 ```
-- Official InsightFace team API
-- Uses INSwapper model (inswapper_dax for high quality)
-- Pricing: 2 credits per second of video
-- Input: Source video URL + Face image URL
-- Output: Swapped video
+- WAN model via fal.ai API
+- Uses trained LoRA for identity preservation
+- Input: Source video + Character diagram + LoRA weights
+- Output: Identity-transferred video
 ```
 
 **API Flow:**
 ```
 1. User selects video from collection
 2. User selects character diagram
-3. User clicks Generate
-4. Backend extracts face closeup region from character diagram (or uses full image)
-5. Backend calls Picsi.ai video face swap API with:
+3. User selects trained LoRA (required)
+4. User clicks Generate
+5. Backend calls fal.ai WAN API with:
    - Source video URL
-   - Face image URL (from character diagram)
+   - Character diagram URL (pose reference)
+   - LoRA weights URL (identity)
 6. Create job record, poll for completion
 7. Download result → Supabase /processed-videos
 8. Show in results panel
 ```
 
 **Tasks:**
-- [x] Set up Picsi.ai B2B API integration
+- [x] Set up fal.ai WAN API integration for face swap
 - [x] Create AI Swapper page UI (two-column layout)
 - [x] Build video selector component
 - [x] Build character diagram selector component
-- [x] Add LoRA selector (disabled with explanation note)
-- [x] Create Picsi.ai service for face swap
+- [x] Build LoRA selector component (required)
+- [x] Create fal.ai service for face swap
 - [x] Build job queue for swap processing
 - [x] Create results panel with job history
 - [x] Handle result download and storage
@@ -519,9 +519,8 @@ After completing tasks, mark them with [x] and update phase status:
 |------|----------|-----------|
 | 2026-01-08 | Use direct source models, not wrappers | Higgsfield/fal.ai wrap underlying models — go direct |
 | 2026-01-08 | Google Gemini for character diagrams | "Nano Banana Pro" is Gemini 3.0 Pro Image |
-| 2026-01-08 | Picsi.ai for face swap | Official InsightFace team B2B API (INSwapper) |
-| 2026-01-08 | fal.ai Wan 2.2 for LoRA | fal.ai is the source, not a wrapper |
-| 2026-01-08 | LoRA not direct input to face swap | InsightFace doesn't accept LoRAs — uses face image only |
+| 2026-01-08 | fal.ai WAN for both LoRA training AND face swap | WAN handles identity via LoRA directly |
+| 2026-01-08 | LoRA is REQUIRED input for face swap | WAN uses trained LoRA for identity preservation |
 | - | Cloud-only (no GPU) | Simpler, matches original workflow, pay-per-use |
 | - | Monorepo with Turborepo | Shared types, simpler development |
 | - | Collections for videos/audio | Simplifies variant generator workflow |
@@ -542,12 +541,8 @@ SUPABASE_SERVICE_ROLE_KEY=
 # Google Gemini API (for character diagrams)
 GOOGLE_GEMINI_API_KEY=
 
-# fal.ai (for LoRA training)
+# fal.ai (for LoRA training AND face swap)
 FAL_API_KEY=
-
-# Picsi.ai (for face swap - InsightFace)
-PICSI_API_KEY=
-# Note: Contact contact@insightface.ai for B2B API access
 
 # Replicate (for upscaling - optional)
 REPLICATE_API_TOKEN=
@@ -565,11 +560,10 @@ NEXT_PUBLIC_API_URL=http://localhost:3001
 
 ## API Reference Quick Links
 
-- **fal.ai Wan 2.2 Trainer:** https://fal.ai/models/fal-ai/wan-22-image-trainer
+- **fal.ai WAN 2.2 Trainer:** https://fal.ai/models/fal-ai/wan-22-image-trainer
+- **fal.ai WAN (Video):** https://fal.ai/models/fal-ai/wan
 - **Google Gemini API:** https://ai.google.dev/gemini-api/docs/gemini-3
-- **Picsi.ai (InsightFace):** https://www.insightface.ai/services/face-swap-with-picsi-ai
-- **InsightFace B2B Licensing:** https://www.insightface.ai/services/models-commercial-licensing
 
 ---
 
-*Last updated: 2026-01-08 — ALL PHASES COMPLETE. Full E2E verification passed. ZIP packaging, 24-hour expiry cleanup, Google Gemini integration all working.*
+*Last updated: 2026-01-08 — ALL PHASES COMPLETE. Corrected API architecture: fal.ai WAN handles both LoRA training and face swap (not Picsi.ai).*

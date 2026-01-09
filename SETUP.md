@@ -130,7 +130,7 @@ You can configure API keys in two ways:
 
 **Free tier**: 60 requests/minute, 1500 requests/day
 
-### 4.2 fal.ai API (LoRA Training)
+### 4.2 fal.ai API (LoRA Training & Face Swap)
 
 1. Go to [fal.ai](https://fal.ai) and sign up
 2. Go to [fal.ai/dashboard/keys](https://fal.ai/dashboard/keys)
@@ -140,19 +140,9 @@ You can configure API keys in two ways:
    FAL_API_KEY=your-key-here
    ```
 
-**Pricing**: ~$2 per LoRA training job (pay as you go)
-
-### 4.3 Picsi.ai API (Face Swap)
-
-1. Go to [picsi.ai](https://www.picsi.ai)
-2. Sign up and request B2B API access
-3. Once approved, get your API key from the dashboard
-4. Enter via Settings page or add to `apps/api/.env`:
-   ```
-   PICSI_API_KEY=your-key-here
-   ```
-
-**Note**: Picsi.ai requires approval for API access. Contact their support if needed.
+**Pricing**: Pay as you go
+- ~$2 per LoRA training job (WAN 2.2)
+- Variable cost for face swap video generation (WAN)
 
 ---
 
@@ -235,7 +225,6 @@ SUPABASE_ANON_KEY=eyJ...
 SUPABASE_SERVICE_ROLE_KEY=eyJ...
 GOOGLE_GEMINI_API_KEY=AI...
 FAL_API_KEY=...
-PICSI_API_KEY=...
 REDIS_HOST=localhost
 REDIS_PORT=6379
 REDIS_PASSWORD=

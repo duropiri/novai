@@ -188,8 +188,6 @@ export class SettingsService {
         return this.testGeminiKey(value);
       case 'FAL_API_KEY':
         return this.testFalKey(value);
-      case 'PICSI_API_KEY':
-        return this.testPicsiKey(value);
       default:
         return { valid: true, message: 'Key saved' };
     }
@@ -208,7 +206,7 @@ export class SettingsService {
 
       const error = await response.json();
       return { valid: false, message: error.error?.message || 'Invalid API key' };
-    } catch (error) {
+    } catch {
       return { valid: false, message: 'Failed to test API key' };
     }
   }
@@ -232,18 +230,9 @@ export class SettingsService {
       }
 
       return { valid: true, message: 'fal.ai API key saved' };
-    } catch (error) {
+    } catch {
       return { valid: false, message: 'Failed to test API key' };
     }
-  }
-
-  private async testPicsiKey(apiKey: string): Promise<{ valid: boolean; message: string }> {
-    // Picsi doesn't have a simple validation endpoint
-    // We just check the format
-    if (apiKey && apiKey.length > 10) {
-      return { valid: true, message: 'Picsi API key saved (will be validated on first use)' };
-    }
-    return { valid: false, message: 'API key appears invalid' };
   }
 
   private maskValue(value: string): string {
