@@ -9,11 +9,17 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
+import { IsString, IsOptional, IsNotEmpty } from 'class-validator';
 import { CharacterService, CreateCharacterDiagramDto } from './character.service';
 import { DbCharacterDiagram } from '../files/supabase.service';
 
 class CreateCharacterRequestDto {
+  @IsString()
+  @IsOptional()
   name?: string;
+
+  @IsString()
+  @IsNotEmpty()
   sourceImageUrl!: string;
 }
 

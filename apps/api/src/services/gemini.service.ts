@@ -52,7 +52,7 @@ export class GeminiService {
   private readonly logger = new Logger(GeminiService.name);
   private readonly apiKey: string;
   private readonly baseUrl = 'https://generativelanguage.googleapis.com/v1beta';
-  private readonly model = 'gemini-2.0-flash-exp'; // Image generation model
+  private readonly model = 'gemini-2.0-flash-exp'; // Image generation model (requires paid tier for reliable access)
 
   constructor(private configService: ConfigService) {
     this.apiKey = this.configService.get<string>('GOOGLE_GEMINI_API_KEY') || '';
