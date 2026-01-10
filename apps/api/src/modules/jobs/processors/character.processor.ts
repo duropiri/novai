@@ -37,6 +37,12 @@ export class CharacterProcessor extends WorkerHost {
   }
 
   async process(job: Job<PhotoJobData | LoraJobData>): Promise<void> {
+    // Validate job data before processing
+    if (!job.data?.jobId || !job.data?.diagramId) {
+      this.logger.warn(`Skipping job with invalid data: ${JSON.stringify(job.data)}`);
+      return;
+    }
+
     // Route to appropriate processor based on job name
     if (job.name === 'generate-from-lora') {
       return this.processFromLora(job as Job<LoraJobData>);

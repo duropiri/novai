@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { GoogleGenAI, GenerateContentConfig, MediaResolution } from '@google/genai';
+import { GoogleGenAI, GenerateContentConfig } from '@google/genai';
 
 export interface CharacterDiagramResult {
   imageBase64: string;
@@ -119,7 +119,6 @@ Maintain a neutral, accurate, reference-grade presentation suitable for face-swa
 
     const config: GenerateContentConfig = {
       responseModalities: ['IMAGE', 'TEXT'],
-      mediaResolution: MediaResolution.MEDIA_RESOLUTION_HIGH,
       imageConfig: {
         aspectRatio: '5:4',
         imageSize: '1K',
