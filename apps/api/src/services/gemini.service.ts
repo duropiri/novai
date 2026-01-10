@@ -1,55 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-
-// Google Gemini API types
-export interface GeminiSafetySetting {
-  category: string;
-  threshold: string;
-}
-
-export interface GeminiGenerateContentRequest {
-  contents: Array<{
-    role?: 'user' | 'model';
-    parts: Array<
-      | { text: string }
-      | { inline_data: { mime_type: string; data: string } }
-      | { file_data: { mime_type: string; file_uri: string } }
-    >;
-  }>;
-  generationConfig?: {
-    responseModalities?: string[];
-    temperature?: number;
-    topK?: number;
-    topP?: number;
-    maxOutputTokens?: number;
-    // Image generation settings
-    aspectRatio?: string;
-    numberOfImages?: number;
-  };
-  safetySettings?: GeminiSafetySetting[];
-}
-
-export interface GeminiGenerateContentResponse {
-  candidates: Array<{
-    content: {
-      parts: Array<
-        | { text: string }
-        | { inlineData: { mimeType: string; data: string } }
-      >;
-      role: string;
-    };
-    finishReason: string;
-    safetyRatings?: Array<{
-      category: string;
-      probability: string;
-    }>;
-  }>;
-  usageMetadata?: {
-    promptTokenCount: number;
-    candidatesTokenCount: number;
-    totalTokenCount: number;
-  };
-}
+import { GoogleGenAI, GenerateContentConfig, MediaResolution } from '@google/genai';
 
 export interface CharacterDiagramResult {
   imageBase64: string;
@@ -60,13 +11,15 @@ export interface CharacterDiagramResult {
 export class GeminiService {
   private readonly logger = new Logger(GeminiService.name);
   private readonly apiKey: string;
-  private readonly baseUrl = 'https://generativelanguage.googleapis.com/v1beta';
-  private readonly model = 'gemini-3-pro-image-preview'; // Nano Banana Pro - Gemini 3 Pro Image Preview
+  private ai: GoogleGenAI | null = null;
+  private readonly model = 'gemini-3-pro-image-preview'; // Nano Banana Pro
 
   constructor(private configService: ConfigService) {
     this.apiKey = this.configService.get<string>('GOOGLE_GEMINI_API_KEY') || '';
     if (!this.apiKey) {
       this.logger.warn('GOOGLE_GEMINI_API_KEY not configured. Gemini operations will fail.');
+    } else {
+      this.ai = new GoogleGenAI({ apiKey: this.apiKey });
     }
   }
 
@@ -152,90 +105,80 @@ Maintain a neutral, accurate, reference-grade presentation suitable for face-swa
 
   /**
    * Generate a character diagram from a source image
-   * Uses Gemini's image generation capabilities
+   * Uses Gemini's image generation capabilities (Nano Banana Pro)
    */
   async generateCharacterDiagram(sourceImageUrl: string): Promise<CharacterDiagramResult> {
-    this.logger.log('Generating character diagram with Gemini');
+    if (!this.ai) {
+      throw new Error('Gemini API not configured');
+    }
+
+    this.logger.log('Generating character diagram with Gemini (Nano Banana Pro)');
 
     // Download the source image and convert to base64
     const imageData = await this.downloadImageAsBase64(sourceImageUrl);
 
-    const request: GeminiGenerateContentRequest = {
-      contents: [
-        {
-          parts: [
-            { text: this.CHARACTER_DIAGRAM_PROMPT },
-            {
-              inline_data: {
-                mime_type: imageData.mimeType,
-                data: imageData.base64,
-              },
-            },
-          ],
-        },
-      ],
-      generationConfig: {
-        responseModalities: ['TEXT', 'IMAGE'],
+    const config: GenerateContentConfig = {
+      responseModalities: ['IMAGE', 'TEXT'],
+      mediaResolution: MediaResolution.MEDIA_RESOLUTION_HIGH,
+      imageConfig: {
         aspectRatio: '5:4',
-        numberOfImages: 1,
+        imageSize: '1K',
       },
     };
 
-    const response = await this.generateContent(request);
+    const contents = [
+      {
+        role: 'user',
+        parts: [
+          { text: this.CHARACTER_DIAGRAM_PROMPT },
+          {
+            inlineData: {
+              mimeType: imageData.mimeType,
+              data: imageData.base64,
+            },
+          },
+        ],
+      },
+    ];
 
-    // Debug logging
-    this.logger.debug('Gemini response received', {
-      finishReason: response.candidates?.[0]?.finishReason,
-      safetyRatings: response.candidates?.[0]?.safetyRatings,
-      partsCount: response.candidates?.[0]?.content?.parts?.length,
+    this.logger.log('Calling Gemini API...');
+
+    const response = await this.ai.models.generateContentStream({
+      model: this.model,
+      config,
+      contents,
     });
 
-    // Extract the generated image from the response
-    const imagePart = response.candidates[0]?.content?.parts?.find(
-      (part): part is { inlineData: { mimeType: string; data: string } } =>
-        'inlineData' in part,
-    );
+    // Collect the streamed response
+    let imageBase64: string | null = null;
+    let imageMimeType: string | null = null;
 
-    if (!imagePart) {
-      // Log more details for debugging
-      this.logger.error('No image in Gemini response', {
-        candidates: response.candidates?.length,
-        finishReason: response.candidates?.[0]?.finishReason,
-        parts: response.candidates?.[0]?.content?.parts?.map(p => Object.keys(p)),
-      });
-      throw new Error(`No image generated in Gemini response. Finish reason: ${response.candidates?.[0]?.finishReason || 'unknown'}`);
+    for await (const chunk of response) {
+      if (!chunk.candidates || !chunk.candidates[0]?.content?.parts) {
+        continue;
+      }
+
+      const part = chunk.candidates[0].content.parts[0];
+      if (part && 'inlineData' in part && part.inlineData) {
+        imageBase64 = part.inlineData.data || null;
+        imageMimeType = part.inlineData.mimeType || null;
+        this.logger.log('Image received from Gemini');
+        break;
+      } else if (part && 'text' in part) {
+        this.logger.debug(`Gemini text response: ${part.text}`);
+      }
+    }
+
+    if (!imageBase64 || !imageMimeType) {
+      throw new Error('No image generated in Gemini response');
     }
 
     this.logger.log('Character diagram generated successfully');
 
     return {
-      imageBase64: imagePart.inlineData.data,
-      mimeType: imagePart.inlineData.mimeType,
+      imageBase64,
+      mimeType: imageMimeType,
     };
-  }
-
-  /**
-   * Call the Gemini generateContent API
-   */
-  private async generateContent(
-    request: GeminiGenerateContentRequest,
-  ): Promise<GeminiGenerateContentResponse> {
-    const url = `${this.baseUrl}/models/${this.model}:generateContent?key=${this.apiKey}`;
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(request),
-    });
-
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Gemini API error (${response.status}): ${error}`);
-    }
-
-    return response.json();
   }
 
   /**
