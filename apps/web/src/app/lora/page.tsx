@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { Upload, Trash2, Loader2, CheckCircle, XCircle, Clock, FileUp, Check, X } from 'lucide-react';
+import { Upload, Trash2, Loader2, CheckCircle, XCircle, Clock, FileUp, Check, X, Pencil } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -18,6 +18,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { loraApi, filesApi, type LoraModel } from '@/lib/api';
 
 export default function LoraCreatorPage() {
@@ -31,13 +32,29 @@ export default function LoraCreatorPage() {
   const [loraModels, setLoraModels] = useState<LoraModel[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(true);
 
-  // Upload modal state
+  // Upload/Import modal state
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const [uploadTab, setUploadTab] = useState<'file' | 'url'>('file');
+  // File upload state
   const [uploadName, setUploadName] = useState('');
   const [uploadTriggerWord, setUploadTriggerWord] = useState('');
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadThumbnail, setUploadThumbnail] = useState<File | null>(null);
   const [isUploadingLora, setIsUploadingLora] = useState(false);
+  // URL import state
+  const [importName, setImportName] = useState('');
+  const [importTriggerWord, setImportTriggerWord] = useState('');
+  const [importUrl, setImportUrl] = useState('');
+  const [importThumbnailUrl, setImportThumbnailUrl] = useState('');
+  const [isImporting, setIsImporting] = useState(false);
+
+  // Edit modal state
+  const [renameModalOpen, setRenameModalOpen] = useState(false);
+  const [renameModel, setRenameModel] = useState<LoraModel | null>(null);
+  const [renameName, setRenameName] = useState('');
+  const [renameTriggerWord, setRenameTriggerWord] = useState('');
+  const [renameThumbnail, setRenameThumbnail] = useState<File | null>(null);
+  const [isRenaming, setIsRenaming] = useState(false);
 
   // Fetch existing LoRA models
   const fetchModels = useCallback(async () => {
@@ -171,6 +188,56 @@ export default function LoraCreatorPage() {
     }
   };
 
+  const openRenameModal = (model: LoraModel) => {
+    setRenameModel(model);
+    setRenameName(model.name);
+    setRenameTriggerWord(model.trigger_word);
+    setRenameThumbnail(null);
+    setRenameModalOpen(true);
+  };
+
+  const handleRenameSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!renameModel) return;
+
+    if (!renameName.trim()) {
+      toast({ title: 'Error', description: 'Name is required', variant: 'destructive' });
+      return;
+    }
+
+    if (!renameTriggerWord.trim()) {
+      toast({ title: 'Error', description: 'Trigger word is required', variant: 'destructive' });
+      return;
+    }
+
+    try {
+      setIsRenaming(true);
+
+      // Update name and trigger word
+      await loraApi.update(renameModel.id, {
+        name: renameName.trim(),
+        triggerWord: renameTriggerWord.trim().toLowerCase(),
+      });
+
+      // Upload thumbnail if provided
+      if (renameThumbnail) {
+        await loraApi.updateThumbnail(renameModel.id, renameThumbnail);
+      }
+
+      toast({ title: 'Updated', description: 'LoRA model updated' });
+      setRenameModalOpen(false);
+      setRenameModel(null);
+      setRenameThumbnail(null);
+      fetchModels();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update';
+      toast({ title: 'Error', description: message, variant: 'destructive' });
+    } finally {
+      setIsRenaming(false);
+    }
+  };
+
   const handleUploadSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -216,6 +283,54 @@ export default function LoraCreatorPage() {
       toast({ title: 'Error', description: message, variant: 'destructive' });
     } finally {
       setIsUploadingLora(false);
+    }
+  };
+
+  const handleImportSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!importUrl.trim()) {
+      toast({ title: 'Error', description: 'Please enter a LoRA URL', variant: 'destructive' });
+      return;
+    }
+
+    if (!importName.trim()) {
+      toast({ title: 'Error', description: 'Name is required', variant: 'destructive' });
+      return;
+    }
+
+    if (!importTriggerWord.trim()) {
+      toast({ title: 'Error', description: 'Trigger word is required', variant: 'destructive' });
+      return;
+    }
+
+    try {
+      setIsImporting(true);
+      toast({ title: 'Importing', description: 'Importing LoRA from URL...' });
+
+      await loraApi.import({
+        name: importName.trim(),
+        triggerWord: importTriggerWord.trim().toLowerCase(),
+        weightsUrl: importUrl.trim(),
+        thumbnailUrl: importThumbnailUrl.trim() || undefined,
+      });
+
+      toast({ title: 'Success', description: 'LoRA imported successfully!' });
+
+      // Reset form and close modal
+      setImportName('');
+      setImportTriggerWord('');
+      setImportUrl('');
+      setImportThumbnailUrl('');
+      setUploadModalOpen(false);
+
+      // Refresh models list
+      fetchModels();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to import LoRA';
+      toast({ title: 'Error', description: message, variant: 'destructive' });
+    } finally {
+      setIsImporting(false);
     }
   };
 
@@ -414,72 +529,143 @@ export default function LoraCreatorPage() {
                 </DialogTrigger>
                 <DialogContent className="sm:max-w-md">
                   <DialogHeader>
-                    <DialogTitle>Upload LoRA</DialogTitle>
+                    <DialogTitle>Add LoRA</DialogTitle>
                     <DialogDescription>
-                      Upload an external .safetensors file to your library
+                      Upload a file or import from URL
                     </DialogDescription>
                   </DialogHeader>
-                  <form onSubmit={handleUploadSubmit} className="space-y-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="uploadFile">.safetensors File</Label>
-                      <Input
-                        id="uploadFile"
-                        type="file"
-                        accept=".safetensors"
-                        onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
-                        disabled={isUploadingLora}
-                      />
-                      {uploadFile && (
-                        <p className="text-xs text-muted-foreground">
-                          Selected: {uploadFile.name} ({(uploadFile.size / 1024 / 1024).toFixed(1)} MB)
-                        </p>
-                      )}
-                    </div>
+                  <Tabs value={uploadTab} onValueChange={(v) => setUploadTab(v as 'file' | 'url')}>
+                    <TabsList className="grid w-full grid-cols-2">
+                      <TabsTrigger value="file">Upload File</TabsTrigger>
+                      <TabsTrigger value="url">Import URL</TabsTrigger>
+                    </TabsList>
+                    <TabsContent value="file">
+                      <form onSubmit={handleUploadSubmit} className="space-y-4 mt-4">
+                        <div className="space-y-2">
+                          <Label htmlFor="uploadFile">.safetensors File</Label>
+                          <Input
+                            id="uploadFile"
+                            type="file"
+                            accept=".safetensors"
+                            onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
+                            disabled={isUploadingLora}
+                          />
+                          {uploadFile && (
+                            <p className="text-xs text-muted-foreground">
+                              Selected: {uploadFile.name} ({(uploadFile.size / 1024 / 1024).toFixed(1)} MB)
+                            </p>
+                          )}
+                        </div>
 
-                    <div className="space-y-2">
-                      <Label htmlFor="uploadName">Name</Label>
-                      <Input
-                        id="uploadName"
-                        placeholder="e.g., Jane Doe"
-                        value={uploadName}
-                        onChange={(e) => setUploadName(e.target.value)}
-                        disabled={isUploadingLora}
-                      />
-                    </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="uploadName">Name</Label>
+                          <Input
+                            id="uploadName"
+                            placeholder="e.g., Jane Doe"
+                            value={uploadName}
+                            onChange={(e) => setUploadName(e.target.value)}
+                            disabled={isUploadingLora}
+                          />
+                        </div>
 
-                    <div className="space-y-2">
-                      <Label htmlFor="uploadTriggerWord">Trigger Word</Label>
-                      <Input
-                        id="uploadTriggerWord"
-                        placeholder="e.g., janedoe"
-                        value={uploadTriggerWord}
-                        onChange={(e) => setUploadTriggerWord(e.target.value.toLowerCase())}
-                        disabled={isUploadingLora}
-                      />
-                    </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="uploadTriggerWord">Trigger Word</Label>
+                          <Input
+                            id="uploadTriggerWord"
+                            placeholder="e.g., janedoe"
+                            value={uploadTriggerWord}
+                            onChange={(e) => setUploadTriggerWord(e.target.value.toLowerCase())}
+                            disabled={isUploadingLora}
+                          />
+                        </div>
 
-                    <div className="space-y-2">
-                      <Label htmlFor="uploadThumbnail">Thumbnail (optional)</Label>
-                      <Input
-                        id="uploadThumbnail"
-                        type="file"
-                        accept="image/*"
-                        onChange={(e) => setUploadThumbnail(e.target.files?.[0] || null)}
-                        disabled={isUploadingLora}
-                      />
-                    </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="uploadThumbnail">Thumbnail (optional)</Label>
+                          <Input
+                            id="uploadThumbnail"
+                            type="file"
+                            accept="image/*"
+                            onChange={(e) => setUploadThumbnail(e.target.files?.[0] || null)}
+                            disabled={isUploadingLora}
+                          />
+                        </div>
 
-                    <Button type="submit" className="w-full" disabled={isUploadingLora}>
-                      {isUploadingLora ? (
-                        <>
-                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                          Uploading...
-                        </>
-                      ) : (
-                        'Upload LoRA'
-                      )}
-                    </Button>
-                  </form>
+                        <Button type="submit" className="w-full" disabled={isUploadingLora}>
+                          {isUploadingLora ? (
+                            <>
+                              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                              Uploading...
+                            </>
+                          ) : (
+                            'Upload LoRA'
+                          )}
+                        </Button>
+                      </form>
+                    </TabsContent>
+                    <TabsContent value="url">
+                      <form onSubmit={handleImportSubmit} className="space-y-4 mt-4">
+                        <div className="space-y-2">
+                          <Label htmlFor="importUrl">LoRA URL</Label>
+                          <Input
+                            id="importUrl"
+                            type="url"
+                            placeholder="https://..."
+                            value={importUrl}
+                            onChange={(e) => setImportUrl(e.target.value)}
+                            disabled={isImporting}
+                          />
+                          <p className="text-xs text-muted-foreground">
+                            URL to .safetensors file (fal.ai, Civitai, HuggingFace)
+                          </p>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label htmlFor="importName">Name</Label>
+                          <Input
+                            id="importName"
+                            placeholder="e.g., Jane Doe"
+                            value={importName}
+                            onChange={(e) => setImportName(e.target.value)}
+                            disabled={isImporting}
+                          />
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label htmlFor="importTriggerWord">Trigger Word</Label>
+                          <Input
+                            id="importTriggerWord"
+                            placeholder="e.g., janedoe"
+                            value={importTriggerWord}
+                            onChange={(e) => setImportTriggerWord(e.target.value.toLowerCase())}
+                            disabled={isImporting}
+                          />
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label htmlFor="importThumbnailUrl">Thumbnail URL (optional)</Label>
+                          <Input
+                            id="importThumbnailUrl"
+                            type="url"
+                            placeholder="https://..."
+                            value={importThumbnailUrl}
+                            onChange={(e) => setImportThumbnailUrl(e.target.value)}
+                            disabled={isImporting}
+                          />
+                        </div>
+
+                        <Button type="submit" className="w-full" disabled={isImporting}>
+                          {isImporting ? (
+                            <>
+                              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                              Importing...
+                            </>
+                          ) : (
+                            'Import LoRA'
+                          )}
+                        </Button>
+                      </form>
+                    </TabsContent>
+                  </Tabs>
                 </DialogContent>
               </Dialog>
             </div>
@@ -499,11 +685,26 @@ export default function LoraCreatorPage() {
                 {loraModels.map((model) => (
                   <div
                     key={model.id}
-                    className="flex items-center justify-between p-3 border rounded-lg"
+                    className="flex items-center gap-3 p-3 border rounded-lg"
                   >
-                    <div className="space-y-1">
+                    {/* Thumbnail */}
+                    <div className="w-12 h-12 flex-shrink-0 bg-muted rounded overflow-hidden">
+                      {model.thumbnail_url ? (
+                        <img
+                          src={model.thumbnail_url}
+                          alt={model.name}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center text-muted-foreground">
+                          <Upload className="w-5 h-5" />
+                        </div>
+                      )}
+                    </div>
+                    {/* Info */}
+                    <div className="flex-1 min-w-0 space-y-1">
                       <div className="flex items-center gap-2">
-                        <span className="font-medium">{model.name}</span>
+                        <span className="font-medium truncate">{model.name}</span>
                         {getStatusBadge(model.status)}
                       </div>
                       <div className="text-sm text-muted-foreground">
@@ -515,18 +716,30 @@ export default function LoraCreatorPage() {
                       {model.status === 'failed' && model.error_message && (
                         <p className="text-xs text-destructive">{model.error_message}</p>
                       )}
-                      {model.cost_cents && (
+                      {model.cost_cents !== null && model.cost_cents > 0 && (
                         <p className="text-xs text-muted-foreground">
                           Cost: ${(model.cost_cents / 100).toFixed(2)}
                         </p>
                       )}
                     </div>
-                    <div className="flex gap-2">
+                    {/* Actions */}
+                    <div className="flex gap-1">
+                      {model.status === 'ready' && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => openRenameModal(model)}
+                          title="Edit"
+                        >
+                          <Pencil className="w-4 h-4" />
+                        </Button>
+                      )}
                       {(model.status === 'ready' || model.status === 'failed') && (
                         <Button
                           variant="ghost"
                           size="icon"
                           onClick={() => handleDelete(model.id)}
+                          title="Delete"
                         >
                           <Trash2 className="w-4 h-4" />
                         </Button>
@@ -539,6 +752,91 @@ export default function LoraCreatorPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Edit Modal */}
+      <Dialog open={renameModalOpen} onOpenChange={setRenameModalOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Edit LoRA Model</DialogTitle>
+            <DialogDescription>
+              Update the name, trigger word, or thumbnail for this model
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleRenameSubmit} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="renameName">Name</Label>
+              <Input
+                id="renameName"
+                value={renameName}
+                onChange={(e) => setRenameName(e.target.value)}
+                disabled={isRenaming}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="renameTriggerWord">Trigger Word</Label>
+              <Input
+                id="renameTriggerWord"
+                value={renameTriggerWord}
+                onChange={(e) => setRenameTriggerWord(e.target.value.toLowerCase())}
+                disabled={isRenaming}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="renameThumbnail">Thumbnail</Label>
+              {renameModel?.thumbnail_url && !renameThumbnail && (
+                <div className="mb-2">
+                  <img
+                    src={renameModel.thumbnail_url}
+                    alt="Current thumbnail"
+                    className="w-16 h-16 object-cover rounded"
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">Current thumbnail</p>
+                </div>
+              )}
+              {renameThumbnail && (
+                <div className="mb-2">
+                  <img
+                    src={URL.createObjectURL(renameThumbnail)}
+                    alt="New thumbnail"
+                    className="w-16 h-16 object-cover rounded"
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">New thumbnail</p>
+                </div>
+              )}
+              <Input
+                id="renameThumbnail"
+                type="file"
+                accept="image/*"
+                onChange={(e) => setRenameThumbnail(e.target.files?.[0] || null)}
+                disabled={isRenaming}
+              />
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setRenameModalOpen(false)}
+                disabled={isRenaming}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" disabled={isRenaming}>
+                {isRenaming ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    Saving...
+                  </>
+                ) : (
+                  'Save Changes'
+                )}
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -1,10 +1,18 @@
 import { Controller, Get, Post, Body, Param, Query, HttpException, HttpStatus } from '@nestjs/common';
+import { IsString, IsNotEmpty, IsIn, IsObject } from 'class-validator';
 import { JobsService, JobType } from './jobs.service';
 import { DbJob } from '../files/supabase.service';
 
 class CreateJobDto {
+  @IsString()
+  @IsIn(['lora_training', 'character_diagram', 'face_swap', 'variant'])
   type!: JobType;
+
+  @IsString()
+  @IsNotEmpty()
   referenceId!: string;
+
+  @IsObject()
   payload!: Record<string, unknown>;
 }
 

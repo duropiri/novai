@@ -40,12 +40,19 @@ export class FilesService {
     const path = `${id}${ext ? `.${ext}` : ''}`;
     const bucketName = STORAGE_BUCKETS[bucket];
 
-    const { url } = await this.supabaseService.uploadFile(
+    // Upload the file
+    await this.supabaseService.uploadFile(
       bucketName,
       path,
       file,
       mimeType,
     );
+
+    // Use signed URLs for all file types to ensure accessibility
+    // Signed URLs work regardless of bucket public/private settings
+    // Long expiry (7 days) for media files
+    const expirySeconds = 7 * 24 * 60 * 60; // 7 days
+    const url = await this.supabaseService.getSignedUrl(bucketName, path, expirySeconds);
 
     const metadata: FileMetadata = {
       id,
@@ -63,19 +70,15 @@ export class FilesService {
     return metadata;
   }
 
-  async getFileUrl(id: string, signed = false): Promise<string> {
+  async getFileUrl(id: string, signed = true): Promise<string> {
     const metadata = this.files.get(id);
     if (!metadata) {
       throw new Error(`File not found: ${id}`);
     }
 
-    if (signed) {
-      return this.supabaseService.getSignedUrl(metadata.bucket, metadata.path);
-    }
-
-    // Return public URL
-    const supabaseUrl = process.env.SUPABASE_URL;
-    return `${supabaseUrl}/storage/v1/object/public/${metadata.bucket}/${metadata.path}`;
+    // Always use signed URLs for reliability (7 day expiry)
+    const expirySeconds = 7 * 24 * 60 * 60;
+    return this.supabaseService.getSignedUrl(metadata.bucket, metadata.path, expirySeconds);
   }
 
   async deleteFile(id: string): Promise<void> {

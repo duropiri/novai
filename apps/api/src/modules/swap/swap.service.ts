@@ -2,12 +2,18 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { JobsService } from '../jobs/jobs.service';
-import { SupabaseService, DbVideo, DbCharacterDiagram } from '../files/supabase.service';
+import { SupabaseService, DbVideo } from '../files/supabase.service';
 import { QUEUES } from '../jobs/queues.constants';
 
 export interface CreateFaceSwapDto {
   videoId: string;
   characterDiagramId: string;
+  loraId?: string; // Optional - identity comes from character diagram
+  // WAN Animate Replace settings
+  resolution?: '480p' | '580p' | '720p';
+  videoQuality?: 'low' | 'medium' | 'high' | 'maximum';
+  useTurbo?: boolean;
+  inferenceSteps?: number;
 }
 
 export interface FaceSwapResult {
@@ -16,6 +22,13 @@ export interface FaceSwapResult {
   characterDiagramId: string;
   estimatedCostCents: number;
 }
+
+// WAN pricing per second by resolution (in cents)
+const WAN_COST_PER_SECOND: Record<string, number> = {
+  '480p': 4, // $0.04/second
+  '580p': 6, // $0.06/second
+  '720p': 8, // $0.08/second
+};
 
 @Injectable()
 export class SwapService {
@@ -44,13 +57,34 @@ export class SwapService {
       throw new Error('Character diagram is not ready');
     }
 
-    // Calculate estimated cost (2 credits per second)
+    // LoRA is optional - identity comes from character diagram
+    let loraData: { weightsUrl?: string; triggerWord?: string } = {};
+    if (dto.loraId) {
+      const lora = await this.supabase.getLoraModel(dto.loraId);
+      if (!lora) {
+        throw new Error('LoRA model not found');
+      }
+      if (lora.status !== 'ready' || !lora.weights_url) {
+        throw new Error('LoRA model is not ready');
+      }
+      loraData = {
+        weightsUrl: lora.weights_url,
+        triggerWord: lora.trigger_word,
+      };
+    }
+
     const durationSeconds = video.duration_seconds || 10;
-    const estimatedCostCents = Math.ceil(durationSeconds * 2);
+    const resolution = dto.resolution || '720p';
+
+    // Calculate estimated cost based on resolution and duration
+    const costPerSecond = WAN_COST_PER_SECOND[resolution] || 8;
+    const estimatedCostCents = Math.ceil(durationSeconds * costPerSecond);
 
     this.logger.log(`Creating face swap job`, {
       videoId: dto.videoId,
       characterDiagramId: dto.characterDiagramId,
+      loraId: dto.loraId,
+      resolution,
       durationSeconds,
       estimatedCostCents,
     });
@@ -61,7 +95,14 @@ export class SwapService {
       videoUrl: video.file_url,
       characterDiagramId: dto.characterDiagramId,
       faceImageUrl: diagram.file_url,
+      loraId: dto.loraId,
+      loraWeightsUrl: loraData.weightsUrl,
+      loraTriggerWord: loraData.triggerWord,
       durationSeconds,
+      resolution,
+      videoQuality: dto.videoQuality,
+      useTurbo: dto.useTurbo,
+      inferenceSteps: dto.inferenceSteps,
     });
 
     // Queue the face swap job
@@ -71,7 +112,14 @@ export class SwapService {
       videoUrl: video.file_url,
       faceImageUrl: diagram.file_url,
       characterDiagramId: dto.characterDiagramId,
+      loraId: dto.loraId,
+      loraWeightsUrl: loraData.weightsUrl,
+      loraTriggerWord: loraData.triggerWord,
       durationSeconds,
+      resolution,
+      videoQuality: dto.videoQuality,
+      useTurbo: dto.useTurbo,
+      inferenceSteps: dto.inferenceSteps,
     });
 
     this.logger.log(`Face swap job queued: ${job.id}`);

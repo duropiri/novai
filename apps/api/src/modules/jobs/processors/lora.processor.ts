@@ -80,27 +80,16 @@ export class LoraProcessor extends WorkerHost {
 
       this.logger.log(`LoRA training completed for ${loraModelId}`);
 
-      // Download weights and config, then upload to Supabase storage
-      const weightsBuffer = await this.downloadFile(result.diffusers_lora_file.url);
-      const configBuffer = await this.downloadFile(result.config_file.url);
+      // Log file info
+      const weightsSize = result.diffusers_lora_file.file_size;
+      this.logger.log(`Weights file size: ${(weightsSize / 1024 / 1024).toFixed(2)} MB`);
 
-      // Upload to Supabase storage
-      const weightsPath = `${loraModelId}/weights.safetensors`;
-      const configPath = `${loraModelId}/config.json`;
+      // Store fal.ai URLs directly (no re-upload needed)
+      // fal.ai URLs are persistent and don't expire quickly
+      const weightsUrl = result.diffusers_lora_file.url;
+      const configUrl = result.config_file.url;
 
-      const { url: weightsUrl } = await this.supabase.uploadFile(
-        'lora-weights',
-        weightsPath,
-        weightsBuffer,
-        'application/octet-stream',
-      );
-
-      const { url: configUrl } = await this.supabase.uploadFile(
-        'lora-weights',
-        configPath,
-        configBuffer,
-        'application/json',
-      );
+      this.logger.log(`Storing fal.ai URLs directly`);
 
       // Update LoRA model with results
       await this.supabase.updateLoraModel(loraModelId, {

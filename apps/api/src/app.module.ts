@@ -8,6 +8,7 @@ import { CharacterModule } from './modules/character/character.module';
 import { CollectionsModule } from './modules/collections/collections.module';
 import { VideosModule } from './modules/videos/videos.module';
 import { SwapModule } from './modules/swap/swap.module';
+import { ImageGenerationModule } from './modules/image-generation/image-generation.module';
 import { AudioModule } from './modules/audio/audio.module';
 import { HooksModule } from './modules/hooks/hooks.module';
 import { VariantsModule } from './modules/variants/variants.module';
@@ -39,6 +40,7 @@ import { HealthController } from './health.controller';
     CollectionsModule,
     VideosModule,
     SwapModule,
+    ImageGenerationModule,
     AudioModule,
     HooksModule,
     VariantsModule,

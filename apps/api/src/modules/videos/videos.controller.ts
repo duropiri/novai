@@ -10,22 +10,56 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
+import { IsString, IsNotEmpty, IsOptional, IsNumber, IsUrl } from 'class-validator';
+import { Type } from 'class-transformer';
 import { VideosService, CreateVideoDto } from './videos.service';
 import { DbVideo } from '../files/supabase.service';
 
 class CreateVideoRequestDto {
+  @IsString()
+  @IsNotEmpty()
   name!: string;
+
+  @IsString()
+  @IsNotEmpty()
   collectionId!: string;
+
+  @IsUrl()
+  @IsNotEmpty()
   fileUrl!: string;
+
+  @IsOptional()
+  @IsUrl()
   thumbnailUrl?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Type(() => Number)
   durationSeconds?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Type(() => Number)
   width?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Type(() => Number)
   height?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Type(() => Number)
   fileSizeBytes?: number;
 }
 
 class UpdateVideoRequestDto {
+  @IsOptional()
+  @IsString()
   name?: string;
+
+  @IsOptional()
+  @IsString()
   collectionId?: string;
 }
 

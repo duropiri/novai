@@ -7,14 +7,31 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
+import { IsArray, IsOptional, IsNumber, IsIn, ArrayMinSize } from 'class-validator';
+import { Type } from 'class-transformer';
 import { VariantsService, CreateVariantBatchDto, VariantBatchResult } from './variants.service';
 import { DbVideo } from '../files/supabase.service';
 
 class CreateVariantBatchRequestDto {
+  @IsArray()
+  @ArrayMinSize(1)
   videoCollectionIds!: string[];
+
+  @IsOptional()
+  @IsArray()
   audioCollectionIds?: string[];
+
+  @IsOptional()
+  @IsArray()
   hookIds?: string[];
+
+  @IsOptional()
+  @IsNumber()
+  @Type(() => Number)
   hookDuration?: number;
+
+  @IsOptional()
+  @IsIn(['top', 'center', 'bottom'])
   hookPosition?: 'top' | 'center' | 'bottom';
 }
 

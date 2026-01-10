@@ -10,20 +10,45 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
+import { IsString, IsNotEmpty, IsOptional, IsArray, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
 import { HooksService, CreateHookDto } from './hooks.service';
 import { DbHook } from '../files/supabase.service';
 
-class CreateHookRequestDto {
+class HookItemDto {
+  @IsString()
+  @IsNotEmpty()
   text!: string;
+
+  @IsOptional()
+  @IsString()
+  category?: string;
+}
+
+class CreateHookRequestDto {
+  @IsString()
+  @IsNotEmpty()
+  text!: string;
+
+  @IsOptional()
+  @IsString()
   category?: string;
 }
 
 class CreateBulkHooksRequestDto {
-  hooks!: Array<{ text: string; category?: string }>;
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => HookItemDto)
+  hooks!: HookItemDto[];
 }
 
 class UpdateHookRequestDto {
+  @IsOptional()
+  @IsString()
   text?: string;
+
+  @IsOptional()
+  @IsString()
   category?: string;
 }
 

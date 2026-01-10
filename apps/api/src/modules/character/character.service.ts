@@ -10,6 +10,20 @@ export interface CreateCharacterDiagramDto {
   sourceImageUrl: string;
 }
 
+export interface CreateCharacterDiagramFromLoraDto {
+  name?: string;
+  loraId: string;
+}
+
+export interface UploadCharacterDiagramDto {
+  name: string;
+  fileUrl: string;
+}
+
+export interface UpdateCharacterDiagramDto {
+  name?: string;
+}
+
 @Injectable()
 export class CharacterService {
   private readonly logger = new Logger(CharacterService.name);
@@ -33,7 +47,7 @@ export class CharacterService {
 
     this.logger.log(`Creating character diagram: ${name}`);
 
-    // Create the character diagram record
+    // Create the character diagram record (basic fields only)
     const diagram = await this.supabase.createCharacterDiagram({
       name,
       source_image_url: dto.sourceImageUrl,
@@ -49,8 +63,8 @@ export class CharacterService {
       name,
     });
 
-    // Queue the generation job
-    await this.characterQueue.add('generate', {
+    // Queue the generation job - photo-based
+    await this.characterQueue.add('generate-from-photo', {
       jobId: job.id,
       diagramId: diagram.id,
       sourceImageUrl: dto.sourceImageUrl,
@@ -60,6 +74,86 @@ export class CharacterService {
     this.logger.log(`Character diagram ${diagram.id} queued for generation`);
 
     return diagram;
+  }
+
+  async createFromLora(dto: CreateCharacterDiagramFromLoraDto): Promise<DbCharacterDiagram> {
+    this.checkInitialized();
+
+    // Get the LoRA model to use its name if diagram name not provided
+    const lora = await this.supabase.getLoraModel(dto.loraId);
+    if (!lora) {
+      throw new Error('LoRA model not found');
+    }
+
+    const name = dto.name?.trim() || `${lora.name} - Character`;
+
+    this.logger.log(`Creating character diagram from LoRA: ${name}`);
+
+    // Create the character diagram record (LoRA reference stored in job metadata)
+    const diagram = await this.supabase.createCharacterDiagram({
+      name,
+      source_image_url: null, // Will be set after reference image generation
+      file_url: null,
+      status: 'pending',
+      error_message: null,
+      cost_cents: null,
+    });
+
+    // Create a job record for tracking
+    const job = await this.jobsService.createJob('character_diagram', diagram.id, {
+      loraId: dto.loraId,
+      loraName: lora.name,
+      triggerWord: lora.trigger_word,
+      weightsUrl: lora.weights_url,
+      name,
+    });
+
+    // Queue the LoRA-based generation job
+    await this.characterQueue.add('generate-from-lora', {
+      jobId: job.id,
+      diagramId: diagram.id,
+      loraId: dto.loraId,
+      triggerWord: lora.trigger_word,
+      weightsUrl: lora.weights_url,
+      name,
+    });
+
+    this.logger.log(`Character diagram ${diagram.id} queued for LoRA-based generation`);
+
+    return diagram;
+  }
+
+  async upload(dto: UploadCharacterDiagramDto): Promise<DbCharacterDiagram> {
+    this.checkInitialized();
+
+    this.logger.log(`Uploading character diagram: ${dto.name}`);
+
+    // Create the character diagram record with status ready (no processing needed)
+    const diagram = await this.supabase.createCharacterDiagram({
+      name: dto.name,
+      source_image_url: null,
+      file_url: dto.fileUrl,
+      status: 'ready',
+      error_message: null,
+      cost_cents: 0, // No cost for manual upload
+    });
+
+    this.logger.log(`Character diagram ${diagram.id} uploaded successfully`);
+
+    return diagram;
+  }
+
+  async update(id: string, dto: UpdateCharacterDiagramDto): Promise<DbCharacterDiagram> {
+    this.checkInitialized();
+
+    const diagram = await this.supabase.getCharacterDiagram(id);
+    if (!diagram) {
+      throw new Error('Character diagram not found');
+    }
+
+    return this.supabase.updateCharacterDiagram(id, {
+      name: dto.name,
+    });
   }
 
   async findAll(status?: string): Promise<DbCharacterDiagram[]> {

@@ -2,6 +2,11 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 // Google Gemini API types
+export interface GeminiSafetySetting {
+  category: string;
+  threshold: string;
+}
+
 export interface GeminiGenerateContentRequest {
   contents: Array<{
     role?: 'user' | 'model';
@@ -18,6 +23,7 @@ export interface GeminiGenerateContentRequest {
     topP?: number;
     maxOutputTokens?: number;
   };
+  safetySettings?: GeminiSafetySetting[];
 }
 
 export interface GeminiGenerateContentResponse {
@@ -52,7 +58,7 @@ export class GeminiService {
   private readonly logger = new Logger(GeminiService.name);
   private readonly apiKey: string;
   private readonly baseUrl = 'https://generativelanguage.googleapis.com/v1beta';
-  private readonly model = 'gemini-2.0-flash-exp'; // Image generation model (requires paid tier for reliable access)
+  private readonly model = 'gemini-3-pro-image-preview'; // Nano Banana Pro - Gemini 3 Pro Image Preview
 
   constructor(private configService: ConfigService) {
     this.apiKey = this.configService.get<string>('GOOGLE_GEMINI_API_KEY') || '';
@@ -61,30 +67,85 @@ export class GeminiService {
     }
   }
 
-  // The character diagram prompt from PROJECT_PLAN.md
+  // The character diagram prompt from character diagram prompt.txt
   private readonly CHARACTER_DIAGRAM_PROMPT = `Using the attached image as the sole visual reference, create a character reference sheet rendered entirely in a realistic photographic style.
 The final output must be one single image containing two photographic views side-by-side on a clean, neutral background.
 
 1. Full-Body Photograph (CRITICAL)
-- Generate true full-length standing photograph, fully visible head to toe
-- NO cropping allowed
-- Leave clear padding above head and below feet
-- If reference is cropped, reconstruct conservatively
-- If holding phone/object, remove it completely
+
+Generate a true full-length, standing photograph of the person that is fully visible from the top of the head to the bottom of the feet.
+
+NO cropping is allowed.
+
+The entire body must be visible including shoes, feet, and the ground contact point.
+
+Leave clear padding above the head and below the feet so nothing is cut off.
+
+Camera framing must resemble a fashion catalog / modeling reference shot, not a portrait crop.
+
+If the reference image is cropped:
+
+Reconstruct missing body parts conservatively and realistically using the same outfit and proportions.
+
+Do NOT invent new shoes or footwear styles.
+
+If shoes are not visible in the reference, generate neutral, realistic continuation footwear that matches the existing outfit exactly and does not introduce new fashion elements.
+
+If the person is holding a phone or any object:
+
+Remove it completely so the hands appear empty and natural.
 
 2. Facial Close-Up
-- High-resolution photorealistic facial close-up
-- Match features, expression, skin texture, lighting exactly
 
-Clothing Requirements (ABSOLUTE):
-- Use EXACT outfit from reference image
-- Never change, rotate, enhance, or stylize clothing
-- Preserve garment type, fit, fabric, colors, patterns, layering
+Next to the full-body view, generate a high-resolution, photorealistic facial close-up.
 
-Footwear Rules:
-- Feet and shoes must be visible
-- If unclear, use plain neutral shoes matching outfit
-- No exaggerated proportions or AI-invented designs`;
+Match facial features, expression, skin texture, and lighting exactly.
+
+Maintain natural pores, realistic skin detail, and accurate proportions.
+
+Lighting and realism must match the full-body image.
+
+Clothing Requirements (ABSOLUTE RULE)
+
+ALWAYS use the exact outfit from the reference image.
+
+Never change, rotate, enhance, stylize, or replace clothing.
+
+Preserve:
+
+Garment type
+
+Fit and silhouette
+
+Fabric texture
+
+Colors
+
+Patterns
+
+Layering
+
+The outfit must be identical to the reference, with only minimal extension if required to complete cropped areas.
+
+Footwear & Lower Body Rules (FACE-SWAP SAFE)
+
+Feet and shoes must always be visible in the full-body image.
+
+Do NOT fabricate fashionable shoes, heels, or stylistic footwear.
+
+If footwear is unclear, use plain, realistic, neutral shoes that align with the existing outfit.
+
+No exaggerated proportions, floating feet, warped shoes, or AI-invented designs.
+
+Strict Rules
+
+Never generate a new outfit.
+
+Never crop or cut off the body at any point.
+
+Never add accessories or props.
+
+Maintain a neutral, accurate, reference-grade presentation suitable for face-swap and identity consistency pipelines.`;
 
   /**
    * Generate a character diagram from a source image
@@ -112,11 +173,17 @@ Footwear Rules:
       ],
       generationConfig: {
         responseModalities: ['TEXT', 'IMAGE'],
-        temperature: 0.7,
       },
     };
 
     const response = await this.generateContent(request);
+
+    // Debug logging
+    this.logger.debug('Gemini response received', {
+      finishReason: response.candidates?.[0]?.finishReason,
+      safetyRatings: response.candidates?.[0]?.safetyRatings,
+      partsCount: response.candidates?.[0]?.content?.parts?.length,
+    });
 
     // Extract the generated image from the response
     const imagePart = response.candidates[0]?.content?.parts?.find(
@@ -125,7 +192,13 @@ Footwear Rules:
     );
 
     if (!imagePart) {
-      throw new Error('No image generated in Gemini response');
+      // Log more details for debugging
+      this.logger.error('No image in Gemini response', {
+        candidates: response.candidates?.length,
+        finishReason: response.candidates?.[0]?.finishReason,
+        parts: response.candidates?.[0]?.content?.parts?.map(p => Object.keys(p)),
+      });
+      throw new Error(`No image generated in Gemini response. Finish reason: ${response.candidates?.[0]?.finishReason || 'unknown'}`);
     }
 
     this.logger.log('Character diagram generated successfully');

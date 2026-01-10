@@ -25,6 +25,12 @@ export interface DbCharacterDiagram {
   name: string;
   source_image_url: string | null;
   file_url: string | null;
+  // LoRA-based generation fields (optional - requires migration 00005)
+  source_lora_id?: string | null;
+  outfit_description?: string | null;
+  background_description?: string | null;
+  pose?: string | null;
+  // Status
   status: 'pending' | 'processing' | 'ready' | 'failed';
   error_message: string | null;
   cost_cents: number | null;
@@ -76,7 +82,7 @@ export interface DbHook {
 
 export interface DbJob {
   id: string;
-  type: 'lora_training' | 'character_diagram' | 'face_swap' | 'variant';
+  type: 'lora_training' | 'character_diagram' | 'face_swap' | 'image_generation' | 'variant';
   reference_id: string;
   status: 'pending' | 'queued' | 'processing' | 'completed' | 'failed';
   progress: number;

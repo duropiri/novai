@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Patch,
   Delete,
   Body,
   Param,
@@ -12,14 +13,48 @@ import {
   UploadedFiles,
 } from '@nestjs/common';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
+import { IsString, IsNotEmpty, IsOptional, IsNumber, IsUrl, Min, Max } from 'class-validator';
+import { Type } from 'class-transformer';
 import { LoraService, CreateLoraDto } from './lora.service';
 import { DbLoraModel } from '../files/supabase.service';
 
-class CreateLoraRequestDto {
+export class CreateLoraRequestDto {
+  @IsString()
+  @IsNotEmpty()
   name!: string;
+
+  @IsString()
+  @IsNotEmpty()
   triggerWord!: string;
+
+  @IsString()
+  @IsNotEmpty()
   imagesZipUrl!: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(100)
+  @Max(10000)
+  @Type(() => Number)
   steps?: number;
+}
+
+export class ImportLoraRequestDto {
+  @IsString()
+  @IsNotEmpty()
+  name!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  triggerWord!: string;
+
+  @IsUrl()
+  @IsNotEmpty()
+  weightsUrl!: string;
+
+  @IsOptional()
+  @IsUrl()
+  thumbnailUrl?: string;
 }
 
 @Controller('lora')
@@ -121,6 +156,37 @@ export class LoraController {
     }
   }
 
+  @Post('import')
+  async importFromUrl(@Body() dto: ImportLoraRequestDto): Promise<DbLoraModel> {
+    // Validate URL format (should be .safetensors or from known hosts)
+    const url = dto.weightsUrl.toLowerCase();
+    const isValidUrl =
+      url.endsWith('.safetensors') ||
+      url.includes('fal.ai') ||
+      url.includes('civitai.com') ||
+      url.includes('huggingface.co') ||
+      url.includes('replicate.delivery');
+
+    if (!isValidUrl) {
+      throw new HttpException(
+        'Invalid URL. Must be a .safetensors file or from a known host (fal.ai, civitai.com, huggingface.co)',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    try {
+      return await this.loraService.importFromUrl({
+        name: dto.name.trim(),
+        triggerWord: dto.triggerWord.trim().toLowerCase(),
+        weightsUrl: dto.weightsUrl,
+        thumbnailUrl: dto.thumbnailUrl,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to import LoRA';
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
   @Get()
   async findAll(@Query('status') status?: string): Promise<DbLoraModel[]> {
     const validStatuses = ['pending', 'training', 'ready', 'failed'];
@@ -140,6 +206,69 @@ export class LoraController {
       throw new HttpException('LoRA model not found', HttpStatus.NOT_FOUND);
     }
     return model;
+  }
+
+  @Patch(':id')
+  async update(
+    @Param('id') id: string,
+    @Body() body: { name?: string; triggerWord?: string; thumbnailUrl?: string },
+  ): Promise<DbLoraModel> {
+    const model = await this.loraService.findOne(id);
+    if (!model) {
+      throw new HttpException('LoRA model not found', HttpStatus.NOT_FOUND);
+    }
+
+    const updates: { name?: string; trigger_word?: string; thumbnail_url?: string | null } = {};
+    if (body.name?.trim()) {
+      updates.name = body.name.trim();
+    }
+    if (body.triggerWord?.trim()) {
+      updates.trigger_word = body.triggerWord.trim().toLowerCase();
+    }
+    if (body.thumbnailUrl !== undefined) {
+      updates.thumbnail_url = body.thumbnailUrl?.trim() || null;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      throw new HttpException('No valid fields to update', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      return await this.loraService.update(id, updates);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update LoRA';
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  @Patch(':id/thumbnail')
+  @UseInterceptors(
+    FileFieldsInterceptor([{ name: 'thumbnail', maxCount: 1 }]),
+  )
+  async updateThumbnail(
+    @Param('id') id: string,
+    @UploadedFiles() files: { thumbnail?: Express.Multer.File[] },
+  ): Promise<DbLoraModel> {
+    const model = await this.loraService.findOne(id);
+    if (!model) {
+      throw new HttpException('LoRA model not found', HttpStatus.NOT_FOUND);
+    }
+
+    if (!files.thumbnail || files.thumbnail.length === 0) {
+      throw new HttpException('Thumbnail file is required', HttpStatus.BAD_REQUEST);
+    }
+
+    const thumbnailFile = files.thumbnail[0];
+
+    try {
+      return await this.loraService.updateThumbnail(id, {
+        buffer: thumbnailFile.buffer,
+        fileName: thumbnailFile.originalname,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update thumbnail';
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
   }
 
   @Delete(':id')

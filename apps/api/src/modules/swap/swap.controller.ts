@@ -7,11 +7,21 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
+import { IsString, IsNotEmpty, IsOptional } from 'class-validator';
 import { SwapService, CreateFaceSwapDto } from './swap.service';
 
 class CreateSwapRequestDto {
+  @IsString()
+  @IsNotEmpty()
   videoId!: string;
+
+  @IsString()
+  @IsNotEmpty()
   characterDiagramId!: string;
+
+  @IsString()
+  @IsOptional()
+  loraId?: string; // Optional - Kling uses character diagram for identity
 }
 
 @Controller('swap')
@@ -26,11 +36,13 @@ export class SwapController {
     if (!dto.characterDiagramId?.trim()) {
       throw new HttpException('Character Diagram ID is required', HttpStatus.BAD_REQUEST);
     }
+    // LoRA is optional - Kling uses character diagram for identity
 
     try {
       const result = await this.swapService.createFaceSwap({
         videoId: dto.videoId.trim(),
         characterDiagramId: dto.characterDiagramId.trim(),
+        loraId: dto.loraId?.trim(),
       });
 
       return {

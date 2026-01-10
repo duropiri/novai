@@ -4,7 +4,7 @@ import { Queue } from 'bullmq';
 import { QUEUES } from './queues.constants';
 import { SupabaseService, DbJob } from '../files/supabase.service';
 
-export type JobType = 'lora_training' | 'character_diagram' | 'face_swap' | 'variant';
+export type JobType = 'lora_training' | 'character_diagram' | 'face_swap' | 'image_generation' | 'variant';
 
 @Injectable()
 export class JobsService {
@@ -15,6 +15,7 @@ export class JobsService {
     @InjectQueue(QUEUES.LORA_TRAINING) private loraQueue: Queue,
     @InjectQueue(QUEUES.CHARACTER_DIAGRAM) private characterQueue: Queue,
     @InjectQueue(QUEUES.FACE_SWAP) private faceSwapQueue: Queue,
+    @InjectQueue(QUEUES.IMAGE_GENERATION) private imageGenerationQueue: Queue,
     @InjectQueue(QUEUES.VARIANT) private variantQueue: Queue,
   ) {}
 
@@ -113,6 +114,8 @@ export class JobsService {
         return this.characterQueue;
       case 'face_swap':
         return this.faceSwapQueue;
+      case 'image_generation':
+        return this.imageGenerationQueue;
       case 'variant':
         return this.variantQueue;
       default:

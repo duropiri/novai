@@ -13,6 +13,7 @@ import {
   Layers,
   FolderOpen,
   Image,
+  ImagePlus,
   Music,
   FileText,
   Settings,
@@ -26,6 +27,7 @@ import {
 const toolsNavigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'LoRA Creator', href: '/lora', icon: User },
+  { name: 'Image Generator', href: '/image-generator', icon: ImagePlus },
   { name: 'Character Diagrams', href: '/characters', icon: Wand2 },
   { name: 'AI Swapper', href: '/swap', icon: Video },
   { name: 'Variant Generator', href: '/variants', icon: Layers },

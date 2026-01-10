@@ -10,19 +10,42 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
+import { IsString, IsNotEmpty, IsOptional, IsNumber, IsUrl } from 'class-validator';
+import { Type } from 'class-transformer';
 import { AudioService, CreateAudioFileDto } from './audio.service';
 import { DbAudioFile } from '../files/supabase.service';
 
 class CreateAudioRequestDto {
+  @IsString()
+  @IsNotEmpty()
   name!: string;
+
+  @IsString()
+  @IsNotEmpty()
   collectionId!: string;
+
+  @IsUrl()
+  @IsNotEmpty()
   fileUrl!: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Type(() => Number)
   durationSeconds?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Type(() => Number)
   fileSizeBytes?: number;
 }
 
 class UpdateAudioRequestDto {
+  @IsOptional()
+  @IsString()
   name?: string;
+
+  @IsOptional()
+  @IsString()
   collectionId?: string;
 }
 

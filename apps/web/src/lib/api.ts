@@ -166,6 +166,13 @@ export interface UploadLoraRequest {
   thumbnail?: File;
 }
 
+export interface ImportLoraRequest {
+  name: string;
+  triggerWord: string;
+  weightsUrl: string;
+  thumbnailUrl?: string;
+}
+
 export const loraApi = {
   list: (status?: string) =>
     fetchApiSilent<LoraModel[]>(`/lora${status ? `?status=${status}` : ''}`, []),
@@ -195,6 +202,35 @@ export const loraApi = {
     if (!response.ok) {
       const error = await response.text();
       throw new Error(error || 'Failed to upload LoRA');
+    }
+
+    return response.json();
+  },
+
+  import: (data: ImportLoraRequest) =>
+    fetchApi<LoraModel>('/lora/import', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  update: (id: string, data: { name?: string; triggerWord?: string; thumbnailUrl?: string }) =>
+    fetchApi<LoraModel>(`/lora/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+
+  updateThumbnail: async (id: string, thumbnail: File): Promise<LoraModel> => {
+    const formData = new FormData();
+    formData.append('thumbnail', thumbnail);
+
+    const response = await fetch(`${API_BASE_URL}/lora/${id}/thumbnail`, {
+      method: 'PATCH',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(error || 'Failed to update thumbnail');
     }
 
     return response.json();
@@ -252,6 +288,12 @@ export const filesApi = {
     const uploads = files.map((file) => filesApi.uploadFile(file, bucket));
     return Promise.all(uploads);
   },
+
+  // Convenience method for uploading images and getting the URL
+  uploadImage: async (file: File): Promise<{ url: string }> => {
+    const metadata = await filesApi.uploadFile(file, 'character-images');
+    return { url: metadata.url };
+  },
 };
 
 // Character Diagrams API
@@ -260,6 +302,12 @@ export interface CharacterDiagram {
   name: string;
   source_image_url: string | null;
   file_url: string | null;
+  // LoRA-based generation
+  source_lora_id: string | null;
+  outfit_description: string | null;
+  background_description: string | null;
+  pose: string | null;
+  // Status
   status: 'pending' | 'processing' | 'ready' | 'failed';
   error_message: string | null;
   cost_cents: number | null;
@@ -272,6 +320,16 @@ export interface CreateCharacterDiagramRequest {
   sourceImageUrl: string;
 }
 
+export interface CreateCharacterDiagramFromLoraRequest {
+  name?: string;
+  loraId: string;
+}
+
+export interface UploadCharacterDiagramRequest {
+  file: File;
+  name: string;
+}
+
 export const characterApi = {
   list: (status?: string) =>
     fetchApiSilent<CharacterDiagram[]>(`/characters${status ? `?status=${status}` : ''}`, []),
@@ -281,6 +339,36 @@ export const characterApi = {
   create: (data: CreateCharacterDiagramRequest) =>
     fetchApi<CharacterDiagram>('/characters', {
       method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  createFromLora: (data: CreateCharacterDiagramFromLoraRequest) =>
+    fetchApi<CharacterDiagram>('/characters/from-lora', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  upload: async (data: UploadCharacterDiagramRequest): Promise<CharacterDiagram> => {
+    const formData = new FormData();
+    formData.append('file', data.file);
+    formData.append('name', data.name);
+
+    const response = await fetch(`${API_BASE_URL}/characters/upload`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(error || 'Failed to upload character diagram');
+    }
+
+    return response.json();
+  },
+
+  update: (id: string, data: { name: string }) =>
+    fetchApi<CharacterDiagram>(`/characters/${id}`, {
+      method: 'PATCH',
       body: JSON.stringify(data),
     }),
 
@@ -489,7 +577,7 @@ export const hooksApi = {
 // Jobs API
 export interface Job {
   id: string;
-  type: 'lora_training' | 'character_diagram' | 'face_swap' | 'variant';
+  type: 'lora_training' | 'character_diagram' | 'face_swap' | 'image_generation' | 'variant';
   reference_id: string;
   status: 'pending' | 'queued' | 'processing' | 'completed' | 'failed';
   progress: number;
@@ -528,6 +616,12 @@ export interface FaceSwapResult {
 export interface CreateFaceSwapRequest {
   videoId: string;
   characterDiagramId: string;
+  loraId?: string; // Optional - identity comes from character diagram
+  // WAN Animate Replace settings
+  resolution?: '480p' | '580p' | '720p';
+  videoQuality?: 'low' | 'medium' | 'high' | 'maximum';
+  useTurbo?: boolean;
+  inferenceSteps?: number;
 }
 
 export const swapApi = {
@@ -540,6 +634,55 @@ export const swapApi = {
   getResult: (jobId: string) => fetchApi<Video>(`/swap/results/${jobId}`),
 
   getHistory: () => fetchApiSilent<Video[]>('/swap/history', []),
+};
+
+// Image Generation API
+export interface GeneratedImage {
+  url: string;
+  width: number;
+  height: number;
+}
+
+export interface ImageGenerationResult {
+  success: boolean;
+  jobId: string;
+  loraId: string;
+  estimatedCostCents: number;
+  mode: 'text-to-image' | 'image-to-image';
+}
+
+export interface CreateImageGenerationRequest {
+  loraId: string;
+  prompt?: string; // Optional when using source image
+  sourceImageUrl?: string; // Optional source image for img2img
+  aspectRatio?: '1:1' | '16:9' | '9:16' | '4:5' | '3:4';
+  numImages: number;
+  loraStrength: number;
+  imageStrength?: number; // How much to preserve source (0-1), default 0.85
+}
+
+export interface ImageGenerationJob {
+  jobId: string;
+  status: string;
+  prompt?: string;
+  sourceImageUrl?: string;
+  mode?: string;
+  images?: GeneratedImage[];
+  createdAt: string;
+}
+
+export const imageGenApi = {
+  create: (data: CreateImageGenerationRequest) =>
+    fetchApi<ImageGenerationResult>('/image-generation', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  getResults: (jobId: string) =>
+    fetchApi<{ images: GeneratedImage[] }>(`/image-generation/results/${jobId}`),
+
+  getHistory: (limit = 20) =>
+    fetchApiSilent<ImageGenerationJob[]>(`/image-generation/history?limit=${limit}`, []),
 };
 
 // Variants API

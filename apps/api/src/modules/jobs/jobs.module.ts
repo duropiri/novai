@@ -5,6 +5,7 @@ import { JobsService } from './jobs.service';
 import { LoraProcessor } from './processors/lora.processor';
 import { CharacterProcessor } from './processors/character.processor';
 import { FaceSwapProcessor } from './processors/face-swap.processor';
+import { ImageGenerationProcessor } from './processors/image-generation.processor';
 import { VariantProcessor } from './processors/variant.processor';
 import { FilesModule } from '../files/files.module';
 import { FalService } from '../../services/fal.service';
@@ -21,6 +22,7 @@ export { QUEUES } from './queues.constants';
       { name: QUEUES.LORA_TRAINING },
       { name: QUEUES.CHARACTER_DIAGRAM },
       { name: QUEUES.FACE_SWAP },
+      { name: QUEUES.IMAGE_GENERATION },
       { name: QUEUES.VARIANT },
     ),
   ],
@@ -33,6 +35,7 @@ export { QUEUES } from './queues.constants';
     LoraProcessor,
     CharacterProcessor,
     FaceSwapProcessor,
+    ImageGenerationProcessor,
     VariantProcessor,
   ],
   exports: [JobsService],

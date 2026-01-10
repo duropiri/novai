@@ -50,6 +50,12 @@ CREATE TABLE IF NOT EXISTS character_diagrams (
   source_image_url TEXT,
   file_url TEXT,
 
+  -- LoRA-based generation
+  source_lora_id UUID REFERENCES lora_models(id) ON DELETE SET NULL,
+  outfit_description TEXT,
+  background_description TEXT,
+  pose TEXT,
+
   -- Status
   status VARCHAR(50) NOT NULL DEFAULT 'pending',
   error_message TEXT,
@@ -197,6 +203,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_type ON jobs(type);
 CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_lora_models_status ON lora_models(status);
 CREATE INDEX IF NOT EXISTS idx_character_diagrams_status ON character_diagrams(status);
+CREATE INDEX IF NOT EXISTS idx_character_diagrams_lora ON character_diagrams(source_lora_id);
 CREATE INDEX IF NOT EXISTS idx_cost_records_job ON cost_records(job_id);
 CREATE INDEX IF NOT EXISTS idx_cost_records_created ON cost_records(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_settings_key ON settings(key);

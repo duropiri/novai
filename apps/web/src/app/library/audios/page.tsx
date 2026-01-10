@@ -12,13 +12,6 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -28,6 +21,8 @@ import {
   Music,
   Upload,
   FolderPlus,
+  Folder,
+  FolderOpen,
   MoreVertical,
   Trash2,
   Pencil,
@@ -36,13 +31,14 @@ import {
   Pause,
   Clock,
   HardDrive,
+  ArrowLeft,
 } from 'lucide-react';
 import { audioApi, collectionsApi, filesApi, Collection, AudioFile } from '@/lib/api';
 
 export default function AudiosPage() {
   const [audios, setAudios] = useState<AudioFile[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
-  const [selectedCollection, setSelectedCollection] = useState<string>('all');
+  const [selectedCollection, setSelectedCollection] = useState<Collection | null>(null);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
 
@@ -62,9 +58,9 @@ export default function AudiosPage() {
     setLoading(true);
     try {
       const [audiosData, collectionsData] = await Promise.all([
-        selectedCollection === 'all'
-          ? audioApi.list()
-          : audioApi.list(selectedCollection),
+        selectedCollection
+          ? audioApi.list(selectedCollection.id)
+          : Promise.resolve([]),
         collectionsApi.list('audio'),
       ]);
       setAudios(audiosData);
@@ -93,7 +89,7 @@ export default function AudiosPage() {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
-    if (selectedCollection === 'all') {
+    if (!selectedCollection) {
       alert('Please select a collection first');
       return;
     }
@@ -107,7 +103,7 @@ export default function AudiosPage() {
         // Create audio record
         await audioApi.create({
           name: file.name.replace(/\.[^/.]+$/, ''),
-          collectionId: selectedCollection,
+          collectionId: selectedCollection.id,
           fileUrl: uploaded.url,
           fileSizeBytes: file.size,
         });
@@ -155,17 +151,17 @@ export default function AudiosPage() {
   };
 
   const handleDeleteCollection = async (collection: Collection) => {
-    if (!confirm(`Delete collection "${collection.name}"? Audio files will be preserved.`)) return;
+    if (!confirm(`Delete collection "${collection.name}"? This cannot be undone.`)) return;
 
     try {
       await collectionsApi.delete(collection.id);
-      if (selectedCollection === collection.id) {
-        setSelectedCollection('all');
+      if (selectedCollection?.id === collection.id) {
+        setSelectedCollection(null);
       }
       await loadData();
     } catch (error) {
       console.error('Failed to delete collection:', error);
-      alert('Failed to delete collection');
+      alert('Failed to delete collection. Make sure it is empty first.');
     }
   };
 
@@ -219,164 +215,233 @@ export default function AudiosPage() {
   return (
     <div className="flex-1 space-y-6 p-8">
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Audios</h1>
-          <p className="text-muted-foreground">
-            Manage your audio collections for the Variant Generator
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={() => setCreateCollectionOpen(true)}>
-            <FolderPlus className="mr-2 h-4 w-4" />
-            New Collection
-          </Button>
-          <div className="relative">
-            <input
-              type="file"
-              accept="audio/*"
-              multiple
-              onChange={handleFileUpload}
-              disabled={uploading || selectedCollection === 'all'}
-              className="absolute inset-0 opacity-0 cursor-pointer disabled:cursor-not-allowed"
-            />
-            <Button disabled={uploading || selectedCollection === 'all'}>
-              {uploading ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Upload className="mr-2 h-4 w-4" />
-              )}
-              {uploading ? 'Uploading...' : 'Upload Audio'}
+        <div className="flex items-center gap-4">
+          {selectedCollection && (
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setSelectedCollection(null)}
+            >
+              <ArrowLeft className="h-5 w-5" />
             </Button>
+          )}
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight">
+              {selectedCollection ? selectedCollection.name : 'Audio Collections'}
+            </h1>
+            <p className="text-muted-foreground">
+              {selectedCollection
+                ? `${audios.length} audio file${audios.length !== 1 ? 's' : ''} in this collection`
+                : 'Organize your audio files into collections'}
+            </p>
           </div>
         </div>
+        <div className="flex items-center gap-2">
+          {!selectedCollection ? (
+            <Button onClick={() => setCreateCollectionOpen(true)}>
+              <FolderPlus className="mr-2 h-4 w-4" />
+              New Collection
+            </Button>
+          ) : (
+            <>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="icon">
+                    <MoreVertical className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem
+                    onClick={() => {
+                      setEditingCollection(selectedCollection);
+                      setNewCollectionName(selectedCollection.name);
+                      setEditCollectionOpen(true);
+                    }}
+                  >
+                    <Pencil className="mr-2 h-4 w-4" />
+                    Rename Collection
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    className="text-destructive"
+                    onClick={() => handleDeleteCollection(selectedCollection)}
+                  >
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    Delete Collection
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <div className="relative">
+                <input
+                  type="file"
+                  accept="audio/*"
+                  multiple
+                  onChange={handleFileUpload}
+                  disabled={uploading}
+                  className="absolute inset-0 opacity-0 cursor-pointer disabled:cursor-not-allowed"
+                />
+                <Button disabled={uploading}>
+                  {uploading ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <Upload className="mr-2 h-4 w-4" />
+                  )}
+                  {uploading ? 'Uploading...' : 'Upload Audio'}
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
-      {/* Collection selector */}
-      <div className="flex items-center gap-4">
-        <Select value={selectedCollection} onValueChange={setSelectedCollection}>
-          <SelectTrigger className="w-[250px]">
-            <SelectValue placeholder="Select collection" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Audio Files</SelectItem>
-            {collections.map((col) => (
-              <SelectItem key={col.id} value={col.id}>
-                {col.name} ({col.itemCount || 0})
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-
-        {selectedCollection !== 'all' && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon">
-                <MoreVertical className="h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent>
-              <DropdownMenuItem
-                onClick={() => {
-                  const col = collections.find((c) => c.id === selectedCollection);
-                  if (col) {
-                    setEditingCollection(col);
-                    setNewCollectionName(col.name);
-                    setEditCollectionOpen(true);
-                  }
-                }}
-              >
-                <Pencil className="mr-2 h-4 w-4" />
-                Rename Collection
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                className="text-destructive"
-                onClick={() => {
-                  const col = collections.find((c) => c.id === selectedCollection);
-                  if (col) handleDeleteCollection(col);
-                }}
-              >
-                <Trash2 className="mr-2 h-4 w-4" />
-                Delete Collection
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
-      </div>
-
-      {/* Audio list */}
+      {/* Main content */}
       {loading ? (
         <div className="flex items-center justify-center py-12">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
-      ) : audios.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Music className="h-12 w-12 text-muted-foreground mb-4" />
-          <h3 className="text-lg font-medium">No audio files yet</h3>
-          <p className="text-muted-foreground mt-1">
-            {selectedCollection === 'all'
-              ? 'Create a collection and upload audio files to get started'
-              : 'Upload audio files to this collection'}
-          </p>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {audios.map((audio) => (
-            <div
-              key={audio.id}
-              className="flex items-center gap-4 p-4 rounded-lg border bg-card hover:bg-muted/50 transition-colors"
-            >
-              {/* Play button */}
-              <Button
-                variant="ghost"
-                size="icon"
-                className="shrink-0"
-                onClick={() => togglePlay(audio)}
+      ) : !selectedCollection ? (
+        /* Collections grid (folder view) */
+        collections.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-12 text-center">
+            <Folder className="h-12 w-12 text-muted-foreground mb-4" />
+            <h3 className="text-lg font-medium">No collections yet</h3>
+            <p className="text-muted-foreground mt-1">
+              Create a collection to organize your audio files
+            </p>
+            <Button className="mt-4" onClick={() => setCreateCollectionOpen(true)}>
+              <FolderPlus className="mr-2 h-4 w-4" />
+              Create First Collection
+            </Button>
+          </div>
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {collections.map((collection) => (
+              <div
+                key={collection.id}
+                className="group relative rounded-lg border bg-card p-4 hover:shadow-md transition-all cursor-pointer hover:border-primary"
+                onClick={() => setSelectedCollection(collection)}
               >
-                {playingId === audio.id ? (
-                  <Pause className="h-5 w-5" />
-                ) : (
-                  <Play className="h-5 w-5" />
-                )}
-              </Button>
-
-              {/* Audio info */}
-              <div className="flex-1 min-w-0">
-                <h3 className="font-medium truncate">{audio.name}</h3>
-                <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground">
-                  <span className="flex items-center gap-1">
-                    <Clock className="h-3 w-3" />
-                    {formatDuration(audio.duration_seconds)}
-                  </span>
-                  <span className="flex items-center gap-1">
-                    <HardDrive className="h-3 w-3" />
-                    {formatFileSize(audio.file_size_bytes)}
-                  </span>
+                <div className="flex items-start gap-3">
+                  <div className="p-2 rounded-lg bg-primary/10">
+                    <FolderOpen className="h-8 w-8 text-primary" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <h3 className="font-medium truncate">{collection.name}</h3>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      {collection.itemCount} file{collection.itemCount !== 1 ? 's' : ''}
+                    </p>
+                  </div>
                 </div>
-              </div>
 
-              {/* Actions */}
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="icon">
-                    <MoreVertical className="h-4 w-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent>
-                  <DropdownMenuItem
-                    className="text-destructive"
-                    onClick={() => {
-                      setDeletingAudio(audio);
-                      setDeleteAudioOpen(true);
-                    }}
-                  >
-                    <Trash2 className="mr-2 h-4 w-4" />
-                    Delete
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-          ))}
-        </div>
+                {/* Actions dropdown */}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <MoreVertical className="h-4 w-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setEditingCollection(collection);
+                        setNewCollectionName(collection.name);
+                        setEditCollectionOpen(true);
+                      }}
+                    >
+                      <Pencil className="mr-2 h-4 w-4" />
+                      Rename
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      className="text-destructive"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteCollection(collection);
+                      }}
+                    >
+                      <Trash2 className="mr-2 h-4 w-4" />
+                      Delete
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            ))}
+          </div>
+        )
+      ) : (
+        /* Audio list (inside collection) */
+        audios.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-12 text-center">
+            <Music className="h-12 w-12 text-muted-foreground mb-4" />
+            <h3 className="text-lg font-medium">No audio files yet</h3>
+            <p className="text-muted-foreground mt-1">
+              Upload audio files to this collection
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {audios.map((audio) => (
+              <div
+                key={audio.id}
+                className="flex items-center gap-4 p-4 rounded-lg border bg-card hover:bg-muted/50 transition-colors"
+              >
+                {/* Play button */}
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="shrink-0"
+                  onClick={() => togglePlay(audio)}
+                >
+                  {playingId === audio.id ? (
+                    <Pause className="h-5 w-5" />
+                  ) : (
+                    <Play className="h-5 w-5" />
+                  )}
+                </Button>
+
+                {/* Audio info */}
+                <div className="flex-1 min-w-0">
+                  <h3 className="font-medium truncate">{audio.name}</h3>
+                  <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground">
+                    <span className="flex items-center gap-1">
+                      <Clock className="h-3 w-3" />
+                      {formatDuration(audio.duration_seconds)}
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <HardDrive className="h-3 w-3" />
+                      {formatFileSize(audio.file_size_bytes)}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="ghost" size="icon">
+                      <MoreVertical className="h-4 w-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent>
+                    <DropdownMenuItem
+                      className="text-destructive"
+                      onClick={() => {
+                        setDeletingAudio(audio);
+                        setDeleteAudioOpen(true);
+                      }}
+                    >
+                      <Trash2 className="mr-2 h-4 w-4" />
+                      Delete
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            ))}
+          </div>
+        )
       )}
 
       {/* Create Collection Dialog */}

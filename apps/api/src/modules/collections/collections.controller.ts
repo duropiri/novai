@@ -10,15 +10,23 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
+import { IsString, IsNotEmpty, IsIn } from 'class-validator';
 import { CollectionsService, CreateCollectionDto, CollectionWithStats } from './collections.service';
 import { DbCollection, DbVideo, DbAudioFile } from '../files/supabase.service';
 
 class CreateCollectionRequestDto {
+  @IsString()
+  @IsNotEmpty()
   name!: string;
+
+  @IsString()
+  @IsIn(['video', 'audio'])
   type!: 'video' | 'audio';
 }
 
 class UpdateCollectionRequestDto {
+  @IsString()
+  @IsNotEmpty()
   name!: string;
 }
 

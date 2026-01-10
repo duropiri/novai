@@ -2,16 +2,25 @@ import {
   Controller,
   Get,
   Post,
+  Patch,
   Delete,
   Body,
   Param,
   Query,
   HttpException,
   HttpStatus,
+  UseInterceptors,
+  UploadedFile,
 } from '@nestjs/common';
-import { IsString, IsOptional, IsNotEmpty } from 'class-validator';
-import { CharacterService, CreateCharacterDiagramDto } from './character.service';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { IsString, IsOptional, IsNotEmpty, IsUUID } from 'class-validator';
+import {
+  CharacterService,
+  CreateCharacterDiagramDto,
+  CreateCharacterDiagramFromLoraDto,
+} from './character.service';
 import { DbCharacterDiagram } from '../files/supabase.service';
+import { FilesService } from '../files/files.service';
 
 class CreateCharacterRequestDto {
   @IsString()
@@ -23,9 +32,28 @@ class CreateCharacterRequestDto {
   sourceImageUrl!: string;
 }
 
+class CreateCharacterFromLoraRequestDto {
+  @IsString()
+  @IsOptional()
+  name?: string;
+
+  @IsUUID()
+  @IsNotEmpty()
+  loraId!: string;
+}
+
+class UpdateCharacterRequestDto {
+  @IsString()
+  @IsNotEmpty()
+  name!: string;
+}
+
 @Controller('characters')
 export class CharacterController {
-  constructor(private readonly characterService: CharacterService) {}
+  constructor(
+    private readonly characterService: CharacterService,
+    private readonly filesService: FilesService,
+  ) {}
 
   @Post()
   async create(@Body() dto: CreateCharacterRequestDto): Promise<DbCharacterDiagram> {
@@ -42,6 +70,61 @@ export class CharacterController {
       return await this.characterService.create(createDto);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to create character diagram';
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  @Post('from-lora')
+  async createFromLora(@Body() dto: CreateCharacterFromLoraRequestDto): Promise<DbCharacterDiagram> {
+    if (!dto.loraId?.trim()) {
+      throw new HttpException('LoRA ID is required', HttpStatus.BAD_REQUEST);
+    }
+
+    const createDto: CreateCharacterDiagramFromLoraDto = {
+      name: dto.name?.trim(),
+      loraId: dto.loraId.trim(),
+    };
+
+    try {
+      return await this.characterService.createFromLora(createDto);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to create character diagram from LoRA';
+      if (message === 'LoRA model not found') {
+        throw new HttpException(message, HttpStatus.NOT_FOUND);
+      }
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  @Post('upload')
+  @UseInterceptors(FileInterceptor('file'))
+  async upload(
+    @UploadedFile() file: Express.Multer.File,
+    @Body('name') name: string,
+  ): Promise<DbCharacterDiagram> {
+    if (!file) {
+      throw new HttpException('File is required', HttpStatus.BAD_REQUEST);
+    }
+    if (!name?.trim()) {
+      throw new HttpException('Name is required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      // Upload file to storage
+      const result = await this.filesService.uploadFile(
+        'CHARACTER_IMAGES',
+        file.buffer,
+        file.originalname,
+        file.mimetype,
+      );
+
+      // Create character diagram record
+      return await this.characterService.upload({
+        name: name.trim(),
+        fileUrl: result.url,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to upload character diagram';
       throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -65,6 +148,26 @@ export class CharacterController {
       throw new HttpException('Character diagram not found', HttpStatus.NOT_FOUND);
     }
     return diagram;
+  }
+
+  @Patch(':id')
+  async update(
+    @Param('id') id: string,
+    @Body() dto: UpdateCharacterRequestDto,
+  ): Promise<DbCharacterDiagram> {
+    if (!dto.name?.trim()) {
+      throw new HttpException('Name is required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      return await this.characterService.update(id, { name: dto.name.trim() });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update character diagram';
+      if (message === 'Character diagram not found') {
+        throw new HttpException(message, HttpStatus.NOT_FOUND);
+      }
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
   }
 
   @Delete(':id')

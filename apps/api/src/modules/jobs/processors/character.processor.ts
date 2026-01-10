@@ -4,12 +4,22 @@ import { Job } from 'bullmq';
 import { QUEUES } from '../queues.constants';
 import { JobsService } from '../jobs.service';
 import { GeminiService } from '../../../services/gemini.service';
+import { FalService } from '../../../services/fal.service';
 import { SupabaseService } from '../../files/supabase.service';
 
-interface CharacterJobData {
+interface PhotoJobData {
   jobId: string;
   diagramId: string;
   sourceImageUrl: string;
+  name: string;
+}
+
+interface LoraJobData {
+  jobId: string;
+  diagramId: string;
+  loraId: string;
+  triggerWord: string;
+  weightsUrl: string;
   name: string;
 }
 
@@ -20,19 +30,32 @@ export class CharacterProcessor extends WorkerHost {
   constructor(
     private readonly jobsService: JobsService,
     private readonly geminiService: GeminiService,
+    private readonly falService: FalService,
     private readonly supabase: SupabaseService,
   ) {
     super();
   }
 
-  async process(job: Job<CharacterJobData>): Promise<void> {
+  async process(job: Job<PhotoJobData | LoraJobData>): Promise<void> {
+    // Route to appropriate processor based on job name
+    if (job.name === 'generate-from-lora') {
+      return this.processFromLora(job as Job<LoraJobData>);
+    }
+    // Default to photo-based (handles both 'generate' and 'generate-from-photo')
+    return this.processFromPhoto(job as Job<PhotoJobData>);
+  }
+
+  /**
+   * Process character diagram from uploaded photo
+   */
+  private async processFromPhoto(job: Job<PhotoJobData>): Promise<void> {
     const { jobId, diagramId, sourceImageUrl } = job.data;
 
     try {
       await this.jobsService.markJobProcessing(jobId);
       await this.supabase.updateCharacterDiagram(diagramId, { status: 'processing' });
 
-      this.logger.log(`Processing character diagram job ${jobId}`, {
+      this.logger.log(`Processing character diagram from photo ${jobId}`, {
         diagramId,
         sourceImageUrl,
       });
@@ -78,14 +101,113 @@ export class CharacterProcessor extends WorkerHost {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       this.logger.error(`Failed character diagram job ${jobId}: ${errorMessage}`);
 
-      // Update diagram status
-      await this.supabase.updateCharacterDiagram(diagramId, {
-        status: 'failed',
-        error_message: errorMessage,
+      if (diagramId) {
+        await this.supabase.updateCharacterDiagram(diagramId, {
+          status: 'failed',
+          error_message: errorMessage,
+        });
+      }
+
+      if (jobId) {
+        await this.jobsService.markJobFailed(jobId, errorMessage);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Process character diagram from LoRA model
+   * Step 1: Generate reference photo using Flux + LoRA
+   * Step 2: Pass that photo to existing character diagram pipeline (same as photo upload)
+   */
+  private async processFromLora(job: Job<LoraJobData>): Promise<void> {
+    const { jobId, diagramId, loraId, triggerWord, weightsUrl, name } = job.data;
+
+    try {
+      await this.jobsService.markJobProcessing(jobId);
+      await this.supabase.updateCharacterDiagram(diagramId, { status: 'processing' });
+
+      this.logger.log(`Processing character diagram from LoRA ${loraId}`, {
+        diagramId,
+        triggerWord,
+        name,
       });
 
-      // Mark job as failed
-      await this.jobsService.markJobFailed(jobId, errorMessage);
+      // Step 1: Generate reference photo using Flux + LoRA
+      this.logger.log('Step 1: Generating reference photo from LoRA...');
+
+      const prompt = `${triggerWord} professional photograph, front facing, looking at camera, neutral expression, natural relaxed pose, arms at sides, clean neutral gray background, full body visible from head to toe, photorealistic, high quality, studio lighting, fashion photography style`;
+
+      const referenceResult = await this.falService.runFluxLoraGeneration({
+        prompt,
+        lora_url: weightsUrl,
+        lora_scale: 0.9,
+        aspect_ratio: '3:4', // Portrait orientation for character diagrams
+        num_images: 1,
+      });
+
+      const generatedPhotoUrl = referenceResult.images[0].url;
+      this.logger.log(`Reference photo generated: ${generatedPhotoUrl}`);
+
+      // Save reference image URL to diagram record
+      await this.supabase.updateCharacterDiagram(diagramId, {
+        source_image_url: generatedPhotoUrl,
+      });
+
+      // Step 2: Generate character diagram using Google Gemini (same as photo flow)
+      this.logger.log('Step 2: Creating character diagram from reference photo...');
+
+      const result = await this.geminiService.generateCharacterDiagram(generatedPhotoUrl);
+
+      this.logger.log(`Character diagram generated for ${diagramId}`);
+
+      // Convert base64 to buffer
+      const imageBuffer = Buffer.from(result.imageBase64, 'base64');
+
+      // Upload to Supabase storage
+      const filePath = `${diagramId}/diagram.${result.mimeType.includes('png') ? 'png' : 'jpg'}`;
+      const { url: fileUrl } = await this.supabase.uploadFile(
+        'character-images',
+        filePath,
+        imageBuffer,
+        result.mimeType,
+      );
+
+      // Update character diagram with result
+      // Cost: ~$0.03 for LoRA generation + ~$0.02 for Gemini = ~$0.05 total
+      const costCents = 5;
+      await this.supabase.updateCharacterDiagram(diagramId, {
+        status: 'ready',
+        file_url: fileUrl,
+        cost_cents: costCents,
+      });
+
+      // Mark job as completed
+      await this.jobsService.markJobCompleted(
+        jobId,
+        {
+          fileUrl,
+          mimeType: result.mimeType,
+          referencePhotoUrl: generatedPhotoUrl,
+        },
+        costCents,
+      );
+
+      this.logger.log(`Character diagram job ${jobId} (LoRA-based) completed successfully`);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Failed LoRA-based character diagram job ${jobId}: ${errorMessage}`);
+
+      if (diagramId) {
+        await this.supabase.updateCharacterDiagram(diagramId, {
+          status: 'failed',
+          error_message: errorMessage,
+        });
+      }
+
+      if (jobId) {
+        await this.jobsService.markJobFailed(jobId, errorMessage);
+      }
       throw error;
     }
   }

@@ -1,20 +1,51 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Loader2, Video, User, Sparkles, Info, Download, Play } from 'lucide-react';
+import { Loader2, Video, User, Sparkles, Download, Play, ExternalLink, Settings, ChevronDown, ChevronUp } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
+import { Slider } from '@/components/ui/slider';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible';
 import { useToast } from '@/components/ui/use-toast';
 import {
   videosApi,
   characterApi,
+  loraApi,
   jobsApi,
   swapApi,
   type Video as VideoType,
   type CharacterDiagram,
+  type LoraModel,
   type Job,
 } from '@/lib/api';
+import { formatDuration } from '@/lib/video-utils';
+
+// WAN pricing per second by resolution (in cents)
+const WAN_COST_PER_SECOND: Record<string, number> = {
+  '480p': 4, // $0.04/second
+  '580p': 6, // $0.06/second
+  '720p': 8, // $0.08/second
+};
 
 export default function AISwapperPage() {
   const { toast } = useToast();
@@ -22,17 +53,30 @@ export default function AISwapperPage() {
   // Selected items
   const [selectedVideo, setSelectedVideo] = useState<VideoType | null>(null);
   const [selectedDiagram, setSelectedDiagram] = useState<CharacterDiagram | null>(null);
+  const [selectedLora, setSelectedLora] = useState<LoraModel | null>(null);
+
+  // WAN settings
+  const [resolution, setResolution] = useState<'480p' | '580p' | '720p'>('720p');
+  const [videoQuality, setVideoQuality] = useState<'low' | 'medium' | 'high' | 'maximum'>('high');
+  const [useTurbo, setUseTurbo] = useState(true);
+  const [inferenceSteps, setInferenceSteps] = useState(20);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   // Data lists
   const [videos, setVideos] = useState<VideoType[]>([]);
   const [diagrams, setDiagrams] = useState<CharacterDiagram[]>([]);
+  const [loras, setLoras] = useState<LoraModel[]>([]);
   const [recentJobs, setRecentJobs] = useState<Job[]>([]);
 
   // Loading states
   const [isLoadingVideos, setIsLoadingVideos] = useState(true);
   const [isLoadingDiagrams, setIsLoadingDiagrams] = useState(true);
+  const [isLoadingLoras, setIsLoadingLoras] = useState(true);
   const [isLoadingJobs, setIsLoadingJobs] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
+
+  // Preview modal
+  const [previewVideo, setPreviewVideo] = useState<VideoType | null>(null);
 
   // Fetch data
   const fetchVideos = useCallback(async () => {
@@ -57,6 +101,17 @@ export default function AISwapperPage() {
     }
   }, []);
 
+  const fetchLoras = useCallback(async () => {
+    try {
+      const data = await loraApi.list('ready');
+      setLoras(data);
+    } catch (error) {
+      console.error('Failed to fetch LoRAs:', error);
+    } finally {
+      setIsLoadingLoras(false);
+    }
+  }, []);
+
   const fetchJobs = useCallback(async () => {
     try {
       const data = await jobsApi.list('face_swap');
@@ -71,23 +126,29 @@ export default function AISwapperPage() {
   useEffect(() => {
     fetchVideos();
     fetchDiagrams();
+    fetchLoras();
     fetchJobs();
 
     // Poll for job updates
     const interval = setInterval(fetchJobs, 5000);
     return () => clearInterval(interval);
-  }, [fetchVideos, fetchDiagrams, fetchJobs]);
+  }, [fetchVideos, fetchDiagrams, fetchLoras, fetchJobs]);
 
-  // Calculate estimated cost (2 credits per second)
-  const estimatedCost = selectedVideo?.duration_seconds
-    ? (selectedVideo.duration_seconds * 2 * 0.01).toFixed(2)
+  // Calculate estimated cost (WAN Animate Replace pricing)
+  const durationSeconds = selectedVideo?.duration_seconds || 0;
+  const costPerSecond = WAN_COST_PER_SECOND[resolution] || 8;
+  const estimatedCost = durationSeconds > 0
+    ? ((durationSeconds * costPerSecond) / 100).toFixed(2)
     : '0.00';
+  const costDescription = durationSeconds > 0
+    ? `$${(costPerSecond / 100).toFixed(2)}/sec at ${resolution}`
+    : '';
 
   const handleGenerate = async () => {
     if (!selectedVideo || !selectedDiagram) {
       toast({
         title: 'Missing Selection',
-        description: 'Please select both a video and a character diagram',
+        description: 'Please select a video and character diagram',
         variant: 'destructive',
       });
       return;
@@ -99,6 +160,11 @@ export default function AISwapperPage() {
       const result = await swapApi.create({
         videoId: selectedVideo.id,
         characterDiagramId: selectedDiagram.id,
+        loraId: selectedLora?.id,
+        resolution,
+        videoQuality,
+        useTurbo,
+        inferenceSteps,
       });
 
       toast({
@@ -112,6 +178,7 @@ export default function AISwapperPage() {
       // Clear selections
       setSelectedVideo(null);
       setSelectedDiagram(null);
+      setSelectedLora(null);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to start face swap';
       toast({
@@ -124,11 +191,22 @@ export default function AISwapperPage() {
     }
   };
 
-  const formatDuration = (seconds: number | null) => {
-    if (!seconds) return '--:--';
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  const handlePreviewJob = async (job: Job) => {
+    if (job.status !== 'completed') return;
+
+    try {
+      const video = await swapApi.getResult(job.id);
+      if (video) {
+        setPreviewVideo(video);
+      }
+    } catch (error) {
+      console.error('Failed to load preview:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to load video preview',
+        variant: 'destructive',
+      });
+    }
   };
 
   const getJobStatusBadge = (status: Job['status']) => {
@@ -137,9 +215,9 @@ export default function AISwapperPage() {
       case 'queued':
         return <Badge variant="outline">Queued</Badge>;
       case 'processing':
-        return <Badge variant="warning"><Loader2 className="w-3 h-3 mr-1 animate-spin" />Processing</Badge>;
+        return <Badge className="bg-yellow-500/10 text-yellow-600 border-yellow-500/20"><Loader2 className="w-3 h-3 mr-1 animate-spin" />Processing</Badge>;
       case 'completed':
-        return <Badge variant="success">Completed</Badge>;
+        return <Badge className="bg-green-500/10 text-green-600 border-green-500/20">Completed</Badge>;
       case 'failed':
         return <Badge variant="destructive">Failed</Badge>;
       default:
@@ -147,12 +225,14 @@ export default function AISwapperPage() {
     }
   };
 
+  const canGenerate = selectedVideo && selectedDiagram && !isGenerating;
+
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold">AI Swapper</h1>
         <p className="text-muted-foreground">
-          Swap faces in videos using your character diagrams
+          Replace characters in any video while preserving the scene&apos;s lighting, background, and color tone
         </p>
       </div>
 
@@ -165,8 +245,9 @@ export default function AISwapperPage() {
               <CardTitle className="flex items-center gap-2 text-lg">
                 <Video className="w-5 h-5" />
                 1. Select Source Video
+                {selectedVideo && <Badge variant="outline" className="ml-auto">Selected</Badge>}
               </CardTitle>
-              <CardDescription>Choose the video to swap faces onto</CardDescription>
+              <CardDescription>Choose the video to apply the character swap to</CardDescription>
             </CardHeader>
             <CardContent>
               {isLoadingVideos ? (
@@ -225,8 +306,9 @@ export default function AISwapperPage() {
               <CardTitle className="flex items-center gap-2 text-lg">
                 <User className="w-5 h-5" />
                 2. Select Character Diagram
+                {selectedDiagram && <Badge variant="outline" className="ml-auto">Selected</Badge>}
               </CardTitle>
-              <CardDescription>Choose the face to swap in</CardDescription>
+              <CardDescription>Choose the character to swap into the video</CardDescription>
             </CardHeader>
             <CardContent>
               {isLoadingDiagrams ? (
@@ -273,37 +355,148 @@ export default function AISwapperPage() {
             </CardContent>
           </Card>
 
-          {/* 3. Select LoRA (Disabled) */}
-          <Card className="opacity-60">
+          {/* 3. Select LoRA Model (Optional) */}
+          <Card>
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-lg">
                 <Sparkles className="w-5 h-5" />
-                3. Select Model (Optional)
-                <Badge variant="outline" className="ml-2">Coming Soon</Badge>
+                3. LoRA Model
+                <Badge variant="outline" className="ml-1">Optional</Badge>
+                {selectedLora && <Badge variant="secondary" className="ml-auto">Selected</Badge>}
               </CardTitle>
-              <CardDescription className="flex items-start gap-2">
-                <Info className="w-4 h-4 mt-0.5 flex-shrink-0" />
-                <span>
-                  LoRA enhances upstream generation consistency, not direct face swap input.
-                  InsightFace uses the face image from your character diagram.
-                </span>
+              <CardDescription>
+                LoRA not required - character identity comes from your Character Diagram
               </CardDescription>
             </CardHeader>
+            <CardContent>
+              {isLoadingLoras ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 className="w-6 h-6 animate-spin" />
+                </div>
+              ) : loras.length === 0 ? (
+                <div className="text-center py-6 text-muted-foreground text-sm">
+                  No LoRA models available (optional)
+                </div>
+              ) : (
+                <div className="grid grid-cols-3 gap-2 max-h-32 overflow-y-auto">
+                  {loras.map((lora) => (
+                    <button
+                      key={lora.id}
+                      onClick={() => setSelectedLora(selectedLora?.id === lora.id ? null : lora)}
+                      className={`relative aspect-square rounded-md overflow-hidden border-2 transition-all ${
+                        selectedLora?.id === lora.id
+                          ? 'border-primary ring-2 ring-primary/50'
+                          : 'border-transparent hover:border-muted-foreground/50'
+                      }`}
+                    >
+                      {lora.thumbnail_url ? (
+                        <img
+                          src={lora.thumbnail_url}
+                          alt={lora.name}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <div className="w-full h-full bg-muted flex items-center justify-center">
+                          <Sparkles className="w-6 h-6 text-muted-foreground" />
+                        </div>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </CardContent>
           </Card>
 
-          {/* Cost Display & Generate Button */}
+          {/* 4. Settings & Generate */}
           <Card>
-            <CardContent className="pt-6">
-              <div className="flex items-center justify-between mb-4">
-                <span className="text-sm text-muted-foreground">Estimated Cost</span>
-                <span className="text-lg font-semibold">${estimatedCost}</span>
+            <CardContent className="pt-6 space-y-4">
+              {/* Advanced Settings */}
+              <Collapsible open={showAdvanced} onOpenChange={setShowAdvanced}>
+                <CollapsibleTrigger asChild>
+                  <Button variant="ghost" size="sm" className="w-full justify-between">
+                    <span className="flex items-center gap-2">
+                      <Settings className="w-4 h-4" />
+                      Advanced Settings
+                    </span>
+                    {showAdvanced ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                  </Button>
+                </CollapsibleTrigger>
+                <CollapsibleContent className="space-y-4 pt-4">
+                    {/* Resolution */}
+                    <div className="space-y-2">
+                      <Label>Resolution</Label>
+                      <Select value={resolution} onValueChange={(v) => setResolution(v as typeof resolution)}>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="480p">480p ($0.04/sec)</SelectItem>
+                          <SelectItem value="580p">580p ($0.06/sec)</SelectItem>
+                          <SelectItem value="720p">720p ($0.08/sec)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    {/* Video Quality */}
+                    <div className="space-y-2">
+                      <Label>Video Quality</Label>
+                      <Select value={videoQuality} onValueChange={(v) => setVideoQuality(v as typeof videoQuality)}>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="low">Low</SelectItem>
+                          <SelectItem value="medium">Medium</SelectItem>
+                          <SelectItem value="high">High</SelectItem>
+                          <SelectItem value="maximum">Maximum</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    {/* Inference Steps */}
+                    <div className="space-y-2">
+                      <div className="flex justify-between">
+                        <Label>Inference Steps</Label>
+                        <span className="text-sm text-muted-foreground">{inferenceSteps}</span>
+                      </div>
+                      <Slider
+                        value={[inferenceSteps]}
+                        onValueChange={([v]) => setInferenceSteps(v)}
+                        min={2}
+                        max={40}
+                        step={1}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Higher = better quality but slower
+                      </p>
+                    </div>
+
+                    {/* Use Turbo */}
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <Label>Use Turbo</Label>
+                        <p className="text-xs text-muted-foreground">Quality enhancement for faster generation</p>
+                      </div>
+                      <Switch checked={useTurbo} onCheckedChange={setUseTurbo} />
+                    </div>
+                  </CollapsibleContent>
+                </Collapsible>
+
+              {/* Cost Display */}
+              <div className="border-t pt-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm text-muted-foreground">Estimated Cost</span>
+                  <span className="text-lg font-semibold">${estimatedCost}</span>
+                </div>
+                {costDescription && (
+                  <p className="text-xs text-muted-foreground mb-4">{costDescription}</p>
+                )}
               </div>
-              <p className="text-xs text-muted-foreground mb-4">
-                Based on 2 credits per second of video
-              </p>
+
+              {/* Generate Button */}
               <Button
                 onClick={handleGenerate}
-                disabled={!selectedVideo || !selectedDiagram || isGenerating}
+                disabled={!canGenerate}
                 className="w-full"
                 size="lg"
               >
@@ -319,6 +512,12 @@ export default function AISwapperPage() {
                   </>
                 )}
               </Button>
+              {!canGenerate && !isGenerating && (
+                <p className="text-xs text-center text-muted-foreground">
+                  {!selectedVideo ? 'Select a source video' :
+                   !selectedDiagram ? 'Select a character diagram' : ''}
+                </p>
+              )}
             </CardContent>
           </Card>
         </div>
@@ -362,14 +561,34 @@ export default function AISwapperPage() {
                       <p className="text-xs text-muted-foreground mt-1">
                         {new Date(job.created_at).toLocaleString()}
                       </p>
+                      {job.error_message && (
+                        <p className="text-xs text-destructive mt-1 truncate">
+                          {job.error_message}
+                        </p>
+                      )}
                     </div>
                     {job.status === 'completed' && (
                       <div className="flex gap-1">
-                        <Button variant="ghost" size="icon" title="Preview">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          title="Preview"
+                          onClick={() => handlePreviewJob(job)}
+                        >
                           <Play className="w-4 h-4" />
                         </Button>
-                        <Button variant="ghost" size="icon" title="Download">
-                          <Download className="w-4 h-4" />
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          title="Open in new tab"
+                          onClick={async () => {
+                            const video = await swapApi.getResult(job.id);
+                            if (video?.file_url) {
+                              window.open(video.file_url, '_blank');
+                            }
+                          }}
+                        >
+                          <ExternalLink className="w-4 h-4" />
                         </Button>
                       </div>
                     )}
@@ -380,6 +599,41 @@ export default function AISwapperPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Preview Dialog */}
+      <Dialog open={!!previewVideo} onOpenChange={(open) => !open && setPreviewVideo(null)}>
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Face Swap Result</DialogTitle>
+          </DialogHeader>
+          {previewVideo && (
+            <div className="space-y-4">
+              <div className="aspect-video bg-black rounded-lg overflow-hidden">
+                <video
+                  src={previewVideo.file_url}
+                  controls
+                  autoPlay
+                  className="w-full h-full"
+                />
+              </div>
+              <div className="flex justify-between items-center">
+                <div>
+                  <p className="font-medium">{previewVideo.name}</p>
+                  <p className="text-sm text-muted-foreground">
+                    Duration: {formatDuration(previewVideo.duration_seconds)}
+                  </p>
+                </div>
+                <Button asChild>
+                  <a href={previewVideo.file_url} download>
+                    <Download className="w-4 h-4 mr-2" />
+                    Download
+                  </a>
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
