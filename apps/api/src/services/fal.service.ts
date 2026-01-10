@@ -585,42 +585,41 @@ export class FalService implements OnModuleInit {
    */
   async runFluxLoraGeneration(input: {
     prompt: string;
+    negative_prompt?: string;
     lora_url: string;
     lora_scale?: number;
-    aspect_ratio?: '1:1' | '16:9' | '9:16' | '4:5' | '3:4';
+    image_size?: { width: number; height: number };
     num_images?: number;
+    guidance_scale?: number;
+    num_inference_steps?: number;
     onProgress?: (status: { status: string }) => void;
   }): Promise<{ images: Array<{ url: string; width: number; height: number }> }> {
     this.logger.log('Running FLUX LoRA image generation via fal.ai client');
     this.logger.log(`Prompt: ${input.prompt.substring(0, 50)}...`);
 
-    // Map aspect ratios to fal.ai image_size format
-    const aspectRatioMap: Record<string, 'square' | 'landscape_16_9' | 'portrait_16_9' | 'portrait_4_3'> = {
-      '1:1': 'square',
-      '16:9': 'landscape_16_9',
-      '9:16': 'portrait_16_9',
-      '4:5': 'portrait_4_3',
-      '3:4': 'portrait_4_3',
-    };
-
     try {
-      const imageSize = aspectRatioMap[input.aspect_ratio ?? '1:1'] || 'square';
+      // Build input with optional negative_prompt (SDK types may not include it)
+      const apiInput: Record<string, unknown> = {
+        prompt: input.prompt,
+        loras: [
+          {
+            path: input.lora_url,
+            scale: input.lora_scale ?? 0.9,
+          },
+        ],
+        image_size: input.image_size ?? { width: 768, height: 1152 }, // Portrait 2:3
+        num_images: input.num_images ?? 1,
+        output_format: 'jpeg',
+        guidance_scale: input.guidance_scale ?? 7.5,
+        num_inference_steps: input.num_inference_steps ?? 30,
+      };
+
+      if (input.negative_prompt) {
+        apiInput.negative_prompt = input.negative_prompt;
+      }
 
       const result = await fal.subscribe('fal-ai/flux-lora', {
-        input: {
-          prompt: input.prompt,
-          loras: [
-            {
-              path: input.lora_url,
-              scale: input.lora_scale ?? 0.8,
-            },
-          ],
-          image_size: imageSize,
-          num_images: input.num_images ?? 1,
-          output_format: 'jpeg',
-          guidance_scale: 3.5,
-          num_inference_steps: 28,
-        },
+        input: apiInput as Parameters<typeof fal.subscribe<'fal-ai/flux-lora'>>[1]['input'],
         logs: true,
         onQueueUpdate: (update) => {
           this.logger.log(`FLUX LoRA queue status: ${update.status}`);

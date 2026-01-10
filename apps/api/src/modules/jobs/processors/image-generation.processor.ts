@@ -119,11 +119,20 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
 
         const fullPrompt = `${loraTriggerWord} ${prompt}`;
 
+        // Map aspect ratio to image size
+        const aspectRatioToSize: Record<string, { width: number; height: number }> = {
+          '1:1': { width: 1024, height: 1024 },
+          '16:9': { width: 1344, height: 768 },
+          '9:16': { width: 768, height: 1344 },
+          '4:5': { width: 896, height: 1120 },
+          '3:4': { width: 896, height: 1152 },
+        };
+
         result = await this.falService.runFluxLoraGeneration({
           prompt: fullPrompt,
           lora_url: loraWeightsUrl,
           lora_scale: loraStrength,
-          aspect_ratio: aspectRatio,
+          image_size: (aspectRatio && aspectRatioToSize[aspectRatio]) ?? { width: 1024, height: 1024 },
           num_images: numImages,
           onProgress: async (status) => {
             if (status.status === 'IN_PROGRESS') {

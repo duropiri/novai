@@ -142,14 +142,19 @@ export class CharacterProcessor extends WorkerHost {
       // Step 1: Generate reference photo using Flux + LoRA
       this.logger.log('Step 1: Generating reference photo from LoRA...');
 
-      const prompt = `A photorealistic full-body photograph of ${triggerWord}, standing in a neutral pose facing directly toward the camera. Arms relaxed naturally at sides. Looking straight ahead at the camera. Plain gray studio background. Fashion catalog reference style. Front-facing view only, no angles, no turns. Full frontal view, not turned, not angled, not looking over shoulder. ID photo pose. Head to toe visible with clear padding above head and below feet. High quality studio lighting.`;
+      const prompt = `A photorealistic full-body photograph of ${triggerWord} wearing a plain black t-shirt and blue jeans, standing in a neutral pose facing directly toward the camera. Feet together, arms relaxed naturally at sides. Looking straight ahead. Plain gray studio background. FULL BODY VISIBLE - head to toe including feet and shoes on ground. Fashion agency digitals style, not editorial pose. Simple standing position like ID photo or police lineup. Front-facing view only, no angles, no turns.`;
+
+      const negativePrompt = `cropped, cut off, partial body, no feet, missing feet, missing legs, spread legs, wide stance, posing, fashion pose, hand on hip, swimsuit, bikini, lingerie, revealing clothing, low angle, high angle, tilted, turned away, looking back, over shoulder, side view, profile`;
 
       const referenceResult = await this.falService.runFluxLoraGeneration({
         prompt,
+        negative_prompt: negativePrompt,
         lora_url: weightsUrl,
         lora_scale: 0.9,
-        aspect_ratio: '3:4', // Portrait orientation for character diagrams
+        image_size: { width: 768, height: 1152 }, // Portrait 2:3 ratio for full body
         num_images: 1,
+        guidance_scale: 7.5,
+        num_inference_steps: 30,
       });
 
       const generatedPhotoUrl = referenceResult.images[0].url;

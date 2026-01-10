@@ -28,6 +28,17 @@ const WAN_COST_PER_SECOND: Record<string, number> = {
   '720p': 8, // $0.08/second = 8 cents
 };
 
+// Maximum time to wait for a face swap job (30 minutes)
+const MAX_JOB_DURATION_MS = 30 * 60 * 1000;
+
+// Timeout error class for identification
+class JobTimeoutError extends Error {
+  constructor(durationMs: number) {
+    super(`Job timed out after ${Math.round(durationMs / 60000)} minutes`);
+    this.name = 'JobTimeoutError';
+  }
+}
+
 @Processor(QUEUES.FACE_SWAP)
 export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
   private readonly logger = new Logger(FaceSwapProcessor.name);
@@ -98,9 +109,10 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
       });
 
       let lastProgress = 10;
+      const startTime = Date.now();
 
-      // Run WAN Animate Replace - the ONLY face swap method
-      const result = await this.falService.runWanAnimateReplace({
+      // Run WAN Animate Replace with timeout protection
+      const falPromise = this.falService.runWanAnimateReplace({
         video_url: videoUrl,
         image_url: faceImageUrl,
         resolution,
@@ -108,6 +120,13 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
         use_turbo: useTurbo,
         num_inference_steps: inferenceSteps,
         onProgress: async (status) => {
+          // Check for timeout during progress updates
+          if (Date.now() - startTime > MAX_JOB_DURATION_MS) {
+            this.logger.warn(`Job ${jobId} exceeded timeout during progress callback`);
+            // The timeout promise will handle the actual failure
+            return;
+          }
+
           if (status.status === 'IN_PROGRESS' && lastProgress < 85) {
             lastProgress = Math.min(85, lastProgress + 5);
             await this.supabase.updateJob(jobId, {
@@ -126,6 +145,16 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
           }
         },
       });
+
+      // Create timeout promise
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(new JobTimeoutError(MAX_JOB_DURATION_MS));
+        }, MAX_JOB_DURATION_MS);
+      });
+
+      // Race between the actual job and the timeout
+      const result = await Promise.race([falPromise, timeoutPromise]);
 
       if (!result.video?.url) {
         throw new Error('WAN Animate Replace completed but no result URL provided');
