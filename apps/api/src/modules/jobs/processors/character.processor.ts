@@ -142,7 +142,7 @@ export class CharacterProcessor extends WorkerHost {
       // Step 1: Generate reference photo using Flux + LoRA
       this.logger.log('Step 1: Generating reference photo from LoRA...');
 
-      const prompt = `${triggerWord} professional photograph, front facing, looking at camera, neutral expression, natural relaxed pose, arms at sides, clean neutral gray background, full body visible from head to toe, photorealistic, high quality, studio lighting, fashion photography style`;
+      const prompt = `A photorealistic full-body photograph of ${triggerWord}, standing in a neutral pose facing directly toward the camera. Arms relaxed naturally at sides. Looking straight ahead at the camera. Plain gray studio background. Fashion catalog reference style. Front-facing view only, no angles, no turns. Full frontal view, not turned, not angled, not looking over shoulder. ID photo pose. Head to toe visible with clear padding above head and below feet. High quality studio lighting.`;
 
       const referenceResult = await this.falService.runFluxLoraGeneration({
         prompt,
