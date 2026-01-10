@@ -22,6 +22,9 @@ export interface GeminiGenerateContentRequest {
     topK?: number;
     topP?: number;
     maxOutputTokens?: number;
+    // Image generation settings
+    aspectRatio?: string;
+    numberOfImages?: number;
   };
   safetySettings?: GeminiSafetySetting[];
 }
@@ -173,6 +176,8 @@ Maintain a neutral, accurate, reference-grade presentation suitable for face-swa
       ],
       generationConfig: {
         responseModalities: ['TEXT', 'IMAGE'],
+        aspectRatio: '5:4',
+        numberOfImages: 1,
       },
     };
 
