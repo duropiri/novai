@@ -142,15 +142,16 @@ export class CharacterProcessor extends WorkerHost {
       // Step 1: Generate reference photo using Flux + LoRA
       this.logger.log('Step 1: Generating reference photo from LoRA...');
 
-      const prompt = `A photorealistic full-body photograph of ${triggerWord} wearing a plain black t-shirt and blue jeans, standing in a neutral pose facing directly toward the camera. Feet together, arms relaxed naturally at sides. Looking straight ahead. Plain gray studio background. FULL BODY VISIBLE - head to toe including feet and shoes on ground. Fashion agency digitals style, not editorial pose. Simple standing position like ID photo or police lineup. Front-facing view only, no angles, no turns.`;
+      // Simple, direct prompt - less is more for pose control
+      const prompt = `Simple passport photo of ${triggerWord}, front facing, neutral expression, gray background, full body standing straight, arms at sides, wearing casual clothes, head to toe visible`;
 
-      const negativePrompt = `cropped, cut off, partial body, no feet, missing feet, missing legs, spread legs, wide stance, posing, fashion pose, hand on hip, swimsuit, bikini, lingerie, revealing clothing, low angle, high angle, tilted, turned away, looking back, over shoulder, side view, profile`;
+      const negativePrompt = `cropped, partial body, no feet, spread legs, posing, fashion pose, hand on hip, swimsuit, bikini, side view, profile, turned away`;
 
       const referenceResult = await this.falService.runFluxLoraGeneration({
         prompt,
         negative_prompt: negativePrompt,
         lora_url: weightsUrl,
-        lora_scale: 0.9,
+        lora_scale: 0.65, // Lower LoRA influence so text prompt controls pose better
         image_size: { width: 768, height: 1152 }, // Portrait 2:3 ratio for full body
         num_images: 1,
         guidance_scale: 7.5,

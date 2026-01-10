@@ -49,4 +49,29 @@ export class JobsController {
     }
     return job;
   }
+
+  @Post(':id/cancel')
+  async cancelJob(@Param('id') id: string): Promise<DbJob> {
+    try {
+      return await this.jobsService.cancelJob(id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to cancel job';
+      if (message === 'Job not found') {
+        throw new HttpException(message, HttpStatus.NOT_FOUND);
+      }
+      if (message.includes('Cannot cancel')) {
+        throw new HttpException(message, HttpStatus.BAD_REQUEST);
+      }
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  @Post('cleanup-stuck')
+  async cleanupStuckJobs(
+    @Query('maxAgeMinutes') maxAgeMinutes?: string,
+  ): Promise<{ cleaned: number }> {
+    const maxAge = maxAgeMinutes ? parseInt(maxAgeMinutes, 10) : 60;
+    const cleaned = await this.jobsService.cleanupStuckJobs(maxAge);
+    return { cleaned };
+  }
 }

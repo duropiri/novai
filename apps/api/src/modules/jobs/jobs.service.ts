@@ -96,6 +96,59 @@ export class JobsService {
     });
   }
 
+  async cancelJob(id: string): Promise<DbJob> {
+    const job = await this.supabaseService.getJob(id);
+    if (!job) {
+      throw new Error('Job not found');
+    }
+
+    // Only allow cancellation of pending/queued/processing jobs
+    if (!['pending', 'queued', 'processing'].includes(job.status)) {
+      throw new Error(`Cannot cancel job with status: ${job.status}`);
+    }
+
+    this.logger.log(`Cancelling job ${id}`);
+
+    return this.supabaseService.updateJob(id, {
+      status: 'failed',
+      error_message: 'Cancelled by user',
+      completed_at: new Date().toISOString(),
+    });
+  }
+
+  /**
+   * Cleanup stuck jobs - mark any job that's been processing for too long as failed
+   * This should be called periodically (e.g., every 5 minutes via cron)
+   */
+  async cleanupStuckJobs(maxAgeMinutes = 60): Promise<number> {
+    const cutoffTime = new Date(Date.now() - maxAgeMinutes * 60 * 1000).toISOString();
+
+    // Get all jobs that are still processing but started too long ago
+    const stuckJobs = await this.supabaseService.getClient()
+      .from('jobs')
+      .select('id, type, started_at')
+      .in('status', ['processing', 'queued'])
+      .lt('started_at', cutoffTime);
+
+    if (stuckJobs.error) {
+      this.logger.error(`Failed to query stuck jobs: ${stuckJobs.error.message}`);
+      return 0;
+    }
+
+    const jobs = stuckJobs.data || [];
+
+    for (const job of jobs) {
+      this.logger.warn(`Marking stuck job ${job.id} (type: ${job.type}) as failed`);
+      await this.markJobFailed(job.id, `Job timed out after ${maxAgeMinutes} minutes`);
+    }
+
+    if (jobs.length > 0) {
+      this.logger.log(`Cleaned up ${jobs.length} stuck jobs`);
+    }
+
+    return jobs.length;
+  }
+
   async updateJobProgress(id: string, progress: number): Promise<DbJob> {
     return this.supabaseService.updateJob(id, { progress });
   }

@@ -602,6 +602,16 @@ export const jobsApi = {
   },
 
   get: (id: string) => fetchApi<Job>(`/jobs/${id}`),
+
+  cancel: (id: string) =>
+    fetchApi<Job>(`/jobs/${id}/cancel`, {
+      method: 'POST',
+    }),
+
+  cleanupStuck: (maxAgeMinutes = 60) =>
+    fetchApi<{ cleaned: number }>(`/jobs/cleanup-stuck?maxAgeMinutes=${maxAgeMinutes}`, {
+      method: 'POST',
+    }),
 };
 
 // Face Swap API

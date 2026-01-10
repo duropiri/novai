@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Loader2, Video, User, Sparkles, Download, Play, ExternalLink, Settings, ChevronDown, ChevronUp } from 'lucide-react';
+import { Loader2, Video, User, Sparkles, Download, Play, ExternalLink, Settings, ChevronDown, ChevronUp, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -207,6 +207,32 @@ export default function AISwapperPage() {
         variant: 'destructive',
       });
     }
+  };
+
+  const handleCancelJob = async (job: Job) => {
+    try {
+      await jobsApi.cancel(job.id);
+      toast({
+        title: 'Job Cancelled',
+        description: 'The job has been cancelled',
+      });
+      fetchJobs();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to cancel job';
+      toast({
+        title: 'Error',
+        description: message,
+        variant: 'destructive',
+      });
+    }
+  };
+
+  // Check if a job is stuck (processing for more than 30 minutes)
+  const isJobStuck = (job: Job) => {
+    if (job.status !== 'processing' || !job.started_at) return false;
+    const startedAt = new Date(job.started_at).getTime();
+    const now = Date.now();
+    return now - startedAt > 30 * 60 * 1000; // 30 minutes
   };
 
   const getJobStatusBadge = (status: Job['status']) => {
@@ -544,7 +570,7 @@ export default function AISwapperPage() {
                 {recentJobs.map((job) => (
                   <div
                     key={job.id}
-                    className="border rounded-lg p-3 flex items-center gap-3"
+                    className={`border rounded-lg p-3 flex items-center gap-3 ${isJobStuck(job) ? 'border-yellow-500/50 bg-yellow-500/5' : ''}`}
                   >
                     <div className="w-16 h-12 bg-muted rounded flex items-center justify-center flex-shrink-0">
                       <Video className="w-6 h-6 text-muted-foreground" />
@@ -557,6 +583,11 @@ export default function AISwapperPage() {
                             {job.progress}%
                           </span>
                         )}
+                        {isJobStuck(job) && (
+                          <Badge variant="outline" className="text-yellow-600 border-yellow-500/50 text-xs">
+                            Stuck
+                          </Badge>
+                        )}
                       </div>
                       <p className="text-xs text-muted-foreground mt-1">
                         {new Date(job.created_at).toLocaleString()}
@@ -567,31 +598,46 @@ export default function AISwapperPage() {
                         </p>
                       )}
                     </div>
-                    {job.status === 'completed' && (
-                      <div className="flex gap-1">
+                    <div className="flex gap-1">
+                      {/* Cancel button for pending/queued/processing jobs */}
+                      {['pending', 'queued', 'processing'].includes(job.status) && (
                         <Button
                           variant="ghost"
                           size="icon"
-                          title="Preview"
-                          onClick={() => handlePreviewJob(job)}
+                          title="Cancel job"
+                          onClick={() => handleCancelJob(job)}
+                          className="text-muted-foreground hover:text-destructive"
                         >
-                          <Play className="w-4 h-4" />
+                          <XCircle className="w-4 h-4" />
                         </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          title="Open in new tab"
-                          onClick={async () => {
-                            const video = await swapApi.getResult(job.id);
-                            if (video?.file_url) {
-                              window.open(video.file_url, '_blank');
-                            }
-                          }}
-                        >
-                          <ExternalLink className="w-4 h-4" />
-                        </Button>
-                      </div>
-                    )}
+                      )}
+                      {/* Preview buttons for completed jobs */}
+                      {job.status === 'completed' && (
+                        <>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title="Preview"
+                            onClick={() => handlePreviewJob(job)}
+                          >
+                            <Play className="w-4 h-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title="Open in new tab"
+                            onClick={async () => {
+                              const video = await swapApi.getResult(job.id);
+                              if (video?.file_url) {
+                                window.open(video.file_url, '_blank');
+                              }
+                            }}
+                          >
+                            <ExternalLink className="w-4 h-4" />
+                          </Button>
+                        </>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
