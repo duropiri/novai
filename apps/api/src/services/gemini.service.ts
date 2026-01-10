@@ -117,12 +117,19 @@ Maintain a neutral, accurate, reference-grade presentation suitable for face-swa
     // Download the source image and convert to base64
     const imageData = await this.downloadImageAsBase64(sourceImageUrl);
 
+    const tools = [
+      {
+        googleSearch: {},
+      },
+    ];
+
     const config: GenerateContentConfig = {
       responseModalities: ['IMAGE', 'TEXT'],
       imageConfig: {
         aspectRatio: '5:4',
         imageSize: '1K',
       },
+      tools,
     };
 
     const contents = [
