@@ -142,17 +142,17 @@ export class CharacterProcessor extends WorkerHost {
       // Step 1: Generate reference photo using Flux + LoRA
       this.logger.log('Step 1: Generating reference photo from LoRA...');
 
-      // Simple, direct prompt - less is more for pose control
-      const prompt = `Simple passport photo of ${triggerWord}, front facing, neutral expression, gray background, full body standing straight, arms at sides, wearing casual clothes, head to toe visible`;
+      // Clean reference photo - Gemini handles layout and outfit preservation
+      const prompt = `Portrait photograph of ${triggerWord}, neutral expression, looking directly at camera, soft studio lighting, plain gray background. Standing naturally with relaxed posture, arms at sides. Front-facing, symmetrical pose. Full body visible from head to feet if possible. Simple casual clothing. High quality, sharp focus on face, photorealistic.`;
 
-      const negativePrompt = `cropped, partial body, no feet, spread legs, posing, fashion pose, hand on hip, swimsuit, bikini, side view, profile, turned away`;
+      const negativePrompt = `cropped, partial body, side view, turned away, looking away, fashion pose, hand on hip, spread legs, swimsuit, bikini, accessories, jewelry`;
 
       const referenceResult = await this.falService.runFluxLoraGeneration({
         prompt,
         negative_prompt: negativePrompt,
         lora_url: weightsUrl,
-        lora_scale: 0.65, // Lower LoRA influence so text prompt controls pose better
-        image_size: { width: 768, height: 1152 }, // Portrait 2:3 ratio for full body
+        lora_scale: 0.75, // Balance identity preservation with pose control
+        image_size: { width: 768, height: 1152 }, // Portrait 2:3 ratio
         num_images: 1,
         guidance_scale: 7.5,
         num_inference_steps: 30,
