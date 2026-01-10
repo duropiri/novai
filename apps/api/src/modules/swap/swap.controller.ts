@@ -7,7 +7,8 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
-import { IsString, IsNotEmpty, IsOptional } from 'class-validator';
+import { IsString, IsNotEmpty, IsOptional, IsBoolean, IsNumber, IsIn } from 'class-validator';
+import { Type } from 'class-transformer';
 import { SwapService, CreateFaceSwapDto } from './swap.service';
 
 class CreateSwapRequestDto {
@@ -21,7 +22,26 @@ class CreateSwapRequestDto {
 
   @IsString()
   @IsOptional()
-  loraId?: string; // Optional - Kling uses character diagram for identity
+  loraId?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(['480p', '580p', '720p'])
+  resolution?: '480p' | '580p' | '720p';
+
+  @IsOptional()
+  @IsString()
+  @IsIn(['low', 'medium', 'high', 'maximum'])
+  videoQuality?: 'low' | 'medium' | 'high' | 'maximum';
+
+  @IsOptional()
+  @IsBoolean()
+  useTurbo?: boolean;
+
+  @IsOptional()
+  @IsNumber()
+  @Type(() => Number)
+  inferenceSteps?: number;
 }
 
 @Controller('swap')
@@ -43,6 +63,10 @@ export class SwapController {
         videoId: dto.videoId.trim(),
         characterDiagramId: dto.characterDiagramId.trim(),
         loraId: dto.loraId?.trim(),
+        resolution: dto.resolution,
+        videoQuality: dto.videoQuality,
+        useTurbo: dto.useTurbo,
+        inferenceSteps: dto.inferenceSteps,
       });
 
       return {
