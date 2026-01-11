@@ -142,17 +142,20 @@ export class CharacterProcessor extends WorkerHost {
       // Step 1: Generate reference photo using Flux + LoRA
       this.logger.log('Step 1: Generating reference photo from LoRA...');
 
-      // Clean reference photo - Gemini handles layout and outfit preservation
-      const prompt = `Portrait photograph of ${triggerWord}, neutral expression, looking directly at camera, soft studio lighting, plain gray background. Standing naturally with relaxed posture, arms at sides. Front-facing, symmetrical pose. Full body visible from head to feet if possible. Simple casual clothing. High quality, sharp focus on face, photorealistic.`;
+      // Face-focused portrait - prioritize face quality for character diagram
+      // Gemini will handle the diagram layout, we just need a clear face reference
+      const prompt = `Portrait photograph of ${triggerWord}, head and shoulders, neutral expression, looking directly at camera, soft studio lighting, plain gray background.
+Face in sharp focus, high detail. Symmetrical front-facing view. Natural skin texture.
+Simple clothing visible at shoulders and neckline only. Photorealistic, professional headshot quality.`;
 
-      const negativePrompt = `cropped, partial body, side view, turned away, looking away, fashion pose, hand on hip, spread legs, swimsuit, bikini, accessories, jewelry`;
+      const negativePrompt = `full body, legs, feet, wide shot, fashion pose, side view, turned away, looking away, over the shoulder, blurry face, distorted features, tilted head, excessive accessories`;
 
       const referenceResult = await this.falService.runFluxLoraGeneration({
         prompt,
         negative_prompt: negativePrompt,
         lora_url: weightsUrl,
         lora_scale: 0.75, // Balance identity preservation with pose control
-        image_size: { width: 768, height: 1152 }, // Portrait 2:3 ratio
+        image_size: { width: 1024, height: 1024 }, // Square crop for face focus
         num_images: 1,
         guidance_scale: 7.5,
         num_inference_steps: 30,

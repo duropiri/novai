@@ -8,16 +8,21 @@ import { SupabaseService } from '../../files/supabase.service';
 
 interface ImageGenerationJobData {
   jobId: string;
-  loraId: string;
-  loraWeightsUrl: string;
-  loraTriggerWord: string;
+  // LoRA mode fields
+  loraId?: string;
+  loraWeightsUrl?: string;
+  loraTriggerWord?: string;
+  loraStrength?: number;
+  // Character Diagram mode fields
+  characterDiagramId?: string;
+  characterDiagramUrl?: string;
+  // Common fields
   prompt?: string;
   sourceImageUrl?: string;
   aspectRatio?: '1:1' | '16:9' | '9:16' | '4:5' | '3:4';
   numImages: number;
-  loraStrength: number;
   imageStrength?: number;
-  mode: 'text-to-image' | 'image-to-image';
+  mode: 'text-to-image' | 'face-swap' | 'character-diagram-swap';
 }
 
 @Processor(QUEUES.IMAGE_GENERATION)
@@ -61,11 +66,13 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
       loraId,
       loraWeightsUrl,
       loraTriggerWord,
+      loraStrength,
+      characterDiagramId,
+      characterDiagramUrl,
       prompt,
       sourceImageUrl,
       aspectRatio,
       numImages,
-      loraStrength,
       imageStrength,
       mode,
     } = job.data;
@@ -75,43 +82,144 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
 
       this.logger.log(`Processing image generation job ${jobId}`, {
         loraId,
+        characterDiagramId,
         mode,
         prompt: prompt?.substring(0, 50),
         sourceImageUrl: sourceImageUrl ? 'provided' : 'none',
         aspectRatio,
         numImages,
-        loraStrength,
-        imageStrength,
       });
 
       await this.supabase.updateJob(jobId, { progress: 10 });
 
       let result: { images: Array<{ url: string; width: number; height: number }> };
 
-      if (mode === 'image-to-image' && sourceImageUrl) {
-        // Image-to-image mode: transform source image with LoRA
-        // Build prompt with trigger word if provided
-        const fullPrompt = prompt
-          ? `${loraTriggerWord} ${prompt}`
-          : loraTriggerWord;
+      if (mode === 'character-diagram-swap' && characterDiagramUrl) {
+        // Character Diagram swap mode using Flux PuLID for natural results
+        this.logger.log(`Character Diagram swap mode: using Flux PuLID for identity-preserving generation`);
 
-        result = await this.falService.runFluxLoraImageToImage({
-          image_url: sourceImageUrl,
-          prompt: fullPrompt,
+        await this.supabase.updateJob(jobId, { progress: 20 });
+
+        // Use provided prompt or create a default one
+        const generationPrompt = prompt || 'portrait photo, high quality, photorealistic, natural lighting';
+
+        // Map aspect ratio to PuLID image size
+        const aspectRatioToPulidSize: Record<string, 'square_hd' | 'square' | 'portrait_4_3' | 'portrait_16_9' | 'landscape_4_3' | 'landscape_16_9'> = {
+          '1:1': 'square_hd',
+          '16:9': 'landscape_16_9',
+          '9:16': 'portrait_16_9',
+          '4:5': 'portrait_4_3',
+          '3:4': 'portrait_4_3',
+        };
+        const imageSize = (aspectRatio && aspectRatioToPulidSize[aspectRatio]) || 'square_hd';
+
+        const generatedImages: Array<{ url: string; width: number; height: number }> = [];
+
+        for (let i = 0; i < numImages; i++) {
+          this.logger.log(`Flux PuLID generation ${i + 1}/${numImages} using Character Diagram`);
+
+          const pulidResult = await this.falService.runFluxPulid({
+            prompt: generationPrompt,
+            reference_image_url: characterDiagramUrl,
+            image_size: imageSize,
+            id_weight: 1.0, // Strong identity preservation
+            start_step: 0, // Start early for realistic look
+            num_inference_steps: 20,
+          });
+
+          if (pulidResult.images && pulidResult.images.length > 0) {
+            generatedImages.push({
+              url: pulidResult.images[0].url,
+              width: pulidResult.images[0].width,
+              height: pulidResult.images[0].height,
+            });
+          }
+
+          await this.supabase.updateJob(jobId, {
+            progress: 20 + Math.floor((i + 1) / numImages * 70),
+            external_status: 'GENERATING_WITH_IDENTITY',
+          });
+        }
+
+        result = { images: generatedImages };
+      } else if (mode === 'face-swap' && sourceImageUrl && loraWeightsUrl && loraTriggerWord) {
+        // LoRA Face swap mode: generate reference face from LoRA, then use Flux PuLID
+        this.logger.log(`LoRA Face swap mode: generating reference face from LoRA, then using Flux PuLID`);
+
+        // Step 1: Generate a reference face portrait from the LoRA
+        const facePrompt = `${loraTriggerWord} portrait photo, face closeup, looking at camera, neutral expression, plain background, high quality`;
+
+        await this.supabase.updateJob(jobId, { progress: 20 });
+
+        const faceResult = await this.falService.runFluxLoraGeneration({
+          prompt: facePrompt,
           lora_url: loraWeightsUrl,
-          lora_scale: loraStrength,
-          strength: imageStrength ?? 0.85,
-          num_images: numImages,
+          lora_scale: loraStrength ?? 0.8,
+          image_size: { width: 512, height: 512 },
+          num_images: 1,
           onProgress: async (status) => {
             if (status.status === 'IN_PROGRESS') {
               await this.supabase.updateJob(jobId, {
-                progress: 50,
-                external_status: status.status,
+                progress: 30,
+                external_status: 'GENERATING_FACE',
               });
             }
           },
         });
-      } else {
+
+        if (!faceResult.images || faceResult.images.length === 0) {
+          throw new Error('Failed to generate reference face from LoRA');
+        }
+
+        const referenceFaceUrl = faceResult.images[0].url;
+        this.logger.log(`Reference face generated: ${referenceFaceUrl}`);
+
+        await this.supabase.updateJob(jobId, { progress: 50 });
+
+        // Step 2: Use Flux PuLID with the generated face as identity reference
+        // Use provided prompt or create a default one describing the scene
+        const generationPrompt = prompt || 'portrait photo, high quality, photorealistic, natural lighting';
+
+        // Map aspect ratio to PuLID image size
+        const aspectRatioToPulidSize: Record<string, 'square_hd' | 'square' | 'portrait_4_3' | 'portrait_16_9' | 'landscape_4_3' | 'landscape_16_9'> = {
+          '1:1': 'square_hd',
+          '16:9': 'landscape_16_9',
+          '9:16': 'portrait_16_9',
+          '4:5': 'portrait_4_3',
+          '3:4': 'portrait_4_3',
+        };
+        const imageSize = (aspectRatio && aspectRatioToPulidSize[aspectRatio]) || 'square_hd';
+
+        const generatedImages: Array<{ url: string; width: number; height: number }> = [];
+
+        for (let i = 0; i < numImages; i++) {
+          this.logger.log(`Flux PuLID generation ${i + 1}/${numImages}`);
+
+          const pulidResult = await this.falService.runFluxPulid({
+            prompt: generationPrompt,
+            reference_image_url: referenceFaceUrl,
+            image_size: imageSize,
+            id_weight: 1.0,
+            start_step: 0,
+            num_inference_steps: 20,
+          });
+
+          if (pulidResult.images && pulidResult.images.length > 0) {
+            generatedImages.push({
+              url: pulidResult.images[0].url,
+              width: pulidResult.images[0].width,
+              height: pulidResult.images[0].height,
+            });
+          }
+
+          await this.supabase.updateJob(jobId, {
+            progress: 50 + Math.floor((i + 1) / numImages * 40),
+            external_status: 'GENERATING_WITH_IDENTITY',
+          });
+        }
+
+        result = { images: generatedImages };
+      } else if (mode === 'text-to-image' && loraWeightsUrl && loraTriggerWord) {
         // Text-to-image mode: generate from prompt
         if (!prompt) {
           throw new Error('Prompt is required for text-to-image mode');
@@ -131,7 +239,7 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
         result = await this.falService.runFluxLoraGeneration({
           prompt: fullPrompt,
           lora_url: loraWeightsUrl,
-          lora_scale: loraStrength,
+          lora_scale: loraStrength ?? 0.8,
           image_size: (aspectRatio && aspectRatioToSize[aspectRatio]) ?? { width: 1024, height: 1024 },
           num_images: numImages,
           onProgress: async (status) => {
@@ -143,6 +251,8 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
             }
           },
         });
+      } else {
+        throw new Error(`Invalid mode or missing required data: ${mode}`);
       }
 
       if (!result.images || result.images.length === 0) {
@@ -158,12 +268,13 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
 
       // Download and upload images to Supabase storage
       const uploadedImages: Array<{ url: string; width: number; height: number }> = [];
+      const storageId = loraId || characterDiagramId || 'unknown';
 
       for (let i = 0; i < result.images.length; i++) {
         const image = result.images[i];
         try {
           const imageBuffer = await this.downloadFile(image.url);
-          const filePath = `${loraId}/generated_${Date.now()}_${i}.jpg`;
+          const filePath = `${storageId}/generated_${Date.now()}_${i}.jpg`;
           const { url } = await this.supabase.uploadFile(
             'character-images',
             filePath,
@@ -186,13 +297,13 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
         }
       }
 
-      // Calculate cost: ~$0.03 per image for FLUX LoRA
-      const costCents = Math.ceil(numImages * 3);
+      // Calculate cost: ~$0.03 per image for text-to-image, ~$0.04 for face swap
+      const costCents = mode === 'text-to-image' ? Math.ceil(numImages * 3) : Math.ceil(numImages * 4);
 
       // Build prompt for output
-      const fullPrompt = prompt
+      const fullPrompt = prompt && loraTriggerWord
         ? `${loraTriggerWord} ${prompt}`
-        : loraTriggerWord;
+        : prompt || loraTriggerWord || '';
 
       // Mark job as completed
       await this.jobsService.markJobCompleted(
@@ -203,6 +314,7 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
           sourceImageUrl,
           mode,
           loraId,
+          characterDiagramId,
           aspectRatio,
           numImages,
           loraStrength,

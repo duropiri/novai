@@ -27,7 +27,26 @@ export class LoraProcessor extends WorkerHost {
   }
 
   async process(job: Job<LoraJobData>): Promise<void> {
+    // Log raw job data for debugging
+    this.logger.log(`=== LORA PROCESSOR START ===`);
+    this.logger.log(`Job ID: ${job.id}, Job Name: ${job.name}`);
+    this.logger.log(`Raw job.data: ${JSON.stringify(job.data, null, 2)}`);
+
     const { jobId, loraModelId, imagesZipUrl, triggerWord, steps = 1000 } = job.data;
+
+    // CRITICAL: Validate loraModelId exists - this was missing in old jobs
+    if (!loraModelId) {
+      const errorMsg = `FATAL: loraModelId is undefined in job data. This job was likely created before the fix. Job data: ${JSON.stringify(job.data)}`;
+      this.logger.error(errorMsg);
+
+      // Try to mark the job as failed if we have jobId
+      if (jobId) {
+        await this.jobsService.markJobFailed(jobId, 'loraModelId missing from job data - job created with old code');
+      }
+      throw new Error(errorMsg);
+    }
+
+    this.logger.log(`Validated: loraModelId=${loraModelId}, jobId=${jobId}`);
 
     try {
       await this.jobsService.markJobProcessing(jobId);
@@ -78,18 +97,38 @@ export class LoraProcessor extends WorkerHost {
         },
       });
 
-      this.logger.log(`LoRA training completed for ${loraModelId}`);
+      this.logger.log(`=== LORA TRAINING COMPLETED ===`);
+      this.logger.log(`loraModelId at completion: ${loraModelId}`);
+      this.logger.log(`loraModelId type: ${typeof loraModelId}`);
+      this.logger.log(`Full fal.ai result: ${JSON.stringify(result, null, 2)}`);
 
-      // Log file info
-      const weightsSize = result.diffusers_lora_file.file_size;
+      // Validate fal.ai response structure
+      if (!result) {
+        throw new Error('fal.ai returned null/undefined result');
+      }
+      if (!result.diffusers_lora_file) {
+        throw new Error(`fal.ai result missing diffusers_lora_file. Got: ${JSON.stringify(result)}`);
+      }
+      if (!result.diffusers_lora_file.url) {
+        throw new Error(`fal.ai diffusers_lora_file missing url. Got: ${JSON.stringify(result.diffusers_lora_file)}`);
+      }
+
+      // Extract URLs from correct paths
+      const weightsUrl = result.diffusers_lora_file.url;
+      const configUrl = result.config_file?.url || null;
+      const weightsSize = result.diffusers_lora_file.file_size || 0;
+
+      this.logger.log(`Weights URL: ${weightsUrl}`);
+      this.logger.log(`Config URL: ${configUrl}`);
       this.logger.log(`Weights file size: ${(weightsSize / 1024 / 1024).toFixed(2)} MB`);
 
-      // Store fal.ai URLs directly (no re-upload needed)
-      // fal.ai URLs are persistent and don't expire quickly
-      const weightsUrl = result.diffusers_lora_file.url;
-      const configUrl = result.config_file.url;
+      // Final validation before database update
+      if (!loraModelId || loraModelId === 'undefined') {
+        throw new Error(`loraModelId became invalid after polling: ${loraModelId}`);
+      }
 
-      this.logger.log(`Storing fal.ai URLs directly`);
+      this.logger.log(`About to update LoRA model with ID: "${loraModelId}"`);
+      this.logger.log(`Update payload: status=ready, weights_url=${weightsUrl.substring(0, 50)}...`);
 
       // Update LoRA model with results
       await this.supabase.updateLoraModel(loraModelId, {
@@ -114,17 +153,25 @@ export class LoraProcessor extends WorkerHost {
       this.logger.log(`LoRA training job ${jobId} completed successfully`);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`=== LORA TRAINING FAILED ===`);
       this.logger.error(`Failed LoRA training job ${jobId}: ${errorMessage}`);
+      this.logger.error(`loraModelId at error: ${loraModelId}, type: ${typeof loraModelId}`);
 
-      // Update LoRA model status
-      await this.supabase.updateLoraModel(loraModelId, {
-        status: 'failed',
-        error_message: errorMessage,
-        completed_at: new Date().toISOString(),
-      });
+      // Only update LoRA model if we have a valid ID
+      if (loraModelId && loraModelId !== 'undefined') {
+        await this.supabase.updateLoraModel(loraModelId, {
+          status: 'failed',
+          error_message: errorMessage,
+          completed_at: new Date().toISOString(),
+        });
+      } else {
+        this.logger.error(`Cannot update LoRA model - loraModelId is invalid: ${loraModelId}`);
+      }
 
       // Mark job as failed
-      await this.jobsService.markJobFailed(jobId, errorMessage);
+      if (jobId) {
+        await this.jobsService.markJobFailed(jobId, errorMessage);
+      }
       throw error;
     }
   }

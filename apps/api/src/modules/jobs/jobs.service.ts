@@ -19,12 +19,24 @@ export class JobsService {
     @InjectQueue(QUEUES.VARIANT) private variantQueue: Queue,
   ) {}
 
+  /**
+   * Create a job record in the database.
+   *
+   * IMPORTANT: This method creates the DB record only. The calling service
+   * is responsible for enqueueing the job with the appropriate job name and data.
+   *
+   * Example usage:
+   * ```
+   * const job = await this.jobsService.createJob('face_swap', videoId, { ... });
+   * await this.faceSwapQueue.add('wan-replace', { jobId: job.id, ... });
+   * ```
+   */
   async createJob(
     type: JobType,
     referenceId: string,
     payload: Record<string, unknown>,
   ): Promise<DbJob> {
-    // Create job in database
+    // Create job in database only - caller is responsible for enqueueing
     const job = await this.supabaseService.createJob({
       type,
       reference_id: referenceId,
@@ -39,6 +51,20 @@ export class JobsService {
     });
 
     this.logger.log(`Created job ${job.id} of type ${type}`);
+
+    return job;
+  }
+
+  /**
+   * Create a job record and immediately enqueue it with the job type as the queue job name.
+   * Use this for simple cases where no custom job name is needed.
+   */
+  async createAndEnqueueJob(
+    type: JobType,
+    referenceId: string,
+    payload: Record<string, unknown>,
+  ): Promise<DbJob> {
+    const job = await this.createJob(type, referenceId, payload);
 
     // Enqueue the job
     const queue = this.getQueue(type);
@@ -118,35 +144,100 @@ export class JobsService {
 
   /**
    * Cleanup stuck jobs - mark any job that's been processing for too long as failed
+   * Also updates associated resources (LoRA models, character diagrams, etc.)
    * This should be called periodically (e.g., every 5 minutes via cron)
    */
-  async cleanupStuckJobs(maxAgeMinutes = 60): Promise<number> {
+  async cleanupStuckJobs(maxAgeMinutes = 60): Promise<{ jobs: number; loras: number; diagrams: number }> {
     const cutoffTime = new Date(Date.now() - maxAgeMinutes * 60 * 1000).toISOString();
+    const client = this.supabaseService.getClient();
 
     // Get all jobs that are still processing but started too long ago
-    const stuckJobs = await this.supabaseService.getClient()
+    const stuckJobs = await client
       .from('jobs')
-      .select('id, type, started_at')
-      .in('status', ['processing', 'queued'])
-      .lt('started_at', cutoffTime);
+      .select('id, type, reference_id, started_at')
+      .in('status', ['processing', 'queued', 'pending'])
+      .lt('created_at', cutoffTime);
 
     if (stuckJobs.error) {
       this.logger.error(`Failed to query stuck jobs: ${stuckJobs.error.message}`);
-      return 0;
+      return { jobs: 0, loras: 0, diagrams: 0 };
     }
 
     const jobs = stuckJobs.data || [];
+    let lorasUpdated = 0;
+    let diagramsUpdated = 0;
 
     for (const job of jobs) {
-      this.logger.warn(`Marking stuck job ${job.id} (type: ${job.type}) as failed`);
+      this.logger.warn(`Marking stuck job ${job.id} (type: ${job.type}, ref: ${job.reference_id}) as failed`);
       await this.markJobFailed(job.id, `Job timed out after ${maxAgeMinutes} minutes`);
+
+      // Update associated resources based on job type
+      try {
+        if (job.type === 'lora_training' && job.reference_id) {
+          await client
+            .from('lora_models')
+            .update({
+              status: 'failed',
+              error_message: 'Training timed out',
+              completed_at: new Date().toISOString(),
+            })
+            .eq('id', job.reference_id)
+            .in('status', ['training', 'pending']);
+          lorasUpdated++;
+        } else if (job.type === 'character_diagram' && job.reference_id) {
+          await client
+            .from('character_diagrams')
+            .update({
+              status: 'failed',
+              error_message: 'Processing timed out',
+            })
+            .eq('id', job.reference_id)
+            .in('status', ['processing', 'pending']);
+          diagramsUpdated++;
+        }
+      } catch (err) {
+        this.logger.error(`Failed to update resource for job ${job.id}: ${err}`);
+      }
     }
 
     if (jobs.length > 0) {
-      this.logger.log(`Cleaned up ${jobs.length} stuck jobs`);
+      this.logger.log(`Cleaned up ${jobs.length} stuck jobs, ${lorasUpdated} LoRAs, ${diagramsUpdated} diagrams`);
     }
 
-    return jobs.length;
+    // Also clean up any orphaned LoRA models stuck in training (no associated job)
+    const stuckLoras = await client
+      .from('lora_models')
+      .update({
+        status: 'failed',
+        error_message: 'Training timed out (orphaned)',
+        completed_at: new Date().toISOString(),
+      })
+      .in('status', ['training', 'pending'])
+      .lt('created_at', cutoffTime)
+      .select('id');
+
+    if (stuckLoras.data) {
+      lorasUpdated += stuckLoras.data.length;
+      this.logger.log(`Also cleaned up ${stuckLoras.data.length} orphaned stuck LoRA models`);
+    }
+
+    // Also clean up any orphaned character diagrams stuck in processing
+    const stuckDiagrams = await client
+      .from('character_diagrams')
+      .update({
+        status: 'failed',
+        error_message: 'Processing timed out (orphaned)',
+      })
+      .in('status', ['processing', 'pending'])
+      .lt('created_at', cutoffTime)
+      .select('id');
+
+    if (stuckDiagrams.data) {
+      diagramsUpdated += stuckDiagrams.data.length;
+      this.logger.log(`Also cleaned up ${stuckDiagrams.data.length} orphaned stuck character diagrams`);
+    }
+
+    return { jobs: jobs.length, loras: lorasUpdated, diagrams: diagramsUpdated };
   }
 
   async updateJobProgress(id: string, progress: number): Promise<DbJob> {

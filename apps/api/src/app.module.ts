@@ -14,6 +14,7 @@ import { HooksModule } from './modules/hooks/hooks.module';
 import { VariantsModule } from './modules/variants/variants.module';
 import { StatsModule } from './modules/stats/stats.module';
 import { SettingsModule } from './modules/settings/settings.module';
+import { ImageCollectionsModule } from './modules/image-collections/image-collections.module';
 import { HealthController } from './health.controller';
 
 @Module({
@@ -46,6 +47,7 @@ import { HealthController } from './health.controller';
     VariantsModule,
     StatsModule,
     SettingsModule,
+    ImageCollectionsModule,
   ],
   controllers: [HealthController],
 })

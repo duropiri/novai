@@ -10,7 +10,7 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
-import { IsString, IsNotEmpty, IsOptional, IsNumber, IsUrl } from 'class-validator';
+import { IsString, IsNotEmpty, IsOptional, IsNumber, IsUrl, IsArray } from 'class-validator';
 import { Type } from 'class-transformer';
 import { VideosService, CreateVideoDto } from './videos.service';
 import { DbVideo } from '../files/supabase.service';
@@ -63,6 +63,17 @@ class UpdateVideoRequestDto {
   collectionId?: string;
 }
 
+class MoveVideosDto {
+  @IsArray()
+  @IsString({ each: true })
+  @IsNotEmpty({ each: true })
+  videoIds!: string[];
+
+  @IsOptional()
+  @IsString()
+  collectionId?: string | null;
+}
+
 @Controller('videos')
 export class VideosController {
   constructor(private readonly videosService: VideosService) {}
@@ -100,6 +111,7 @@ export class VideosController {
   async findAll(
     @Query('type') type?: string,
     @Query('collectionId') collectionId?: string,
+    @Query('uncategorized') uncategorized?: string,
   ): Promise<DbVideo[]> {
     if (type && !['source', 'face_swapped', 'variant'].includes(type)) {
       throw new HttpException(
@@ -107,7 +119,33 @@ export class VideosController {
         HttpStatus.BAD_REQUEST,
       );
     }
-    return this.videosService.findAll({ type, collectionId });
+    const isUncategorized = uncategorized === 'true';
+    return this.videosService.findAll({ type, collectionId, uncategorized: isUncategorized });
+  }
+
+  @Get('count')
+  async count(
+    @Query('collectionId') collectionId?: string,
+    @Query('uncategorized') uncategorized?: string,
+  ): Promise<{ count: number }> {
+    const isUncategorized = uncategorized === 'true';
+    const count = await this.videosService.count({ collectionId, uncategorized: isUncategorized });
+    return { count };
+  }
+
+  @Post('move')
+  async move(@Body() dto: MoveVideosDto): Promise<{ success: boolean }> {
+    if (!dto.videoIds || dto.videoIds.length === 0) {
+      throw new HttpException('Video IDs are required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      await this.videosService.moveToCollection(dto.videoIds, dto.collectionId ?? null);
+      return { success: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to move videos';
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
   }
 
   @Get(':id')

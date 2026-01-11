@@ -69,9 +69,8 @@ export class JobsController {
   @Post('cleanup-stuck')
   async cleanupStuckJobs(
     @Query('maxAgeMinutes') maxAgeMinutes?: string,
-  ): Promise<{ cleaned: number }> {
+  ): Promise<{ jobs: number; loras: number; diagrams: number }> {
     const maxAge = maxAgeMinutes ? parseInt(maxAgeMinutes, 10) : 60;
-    const cleaned = await this.jobsService.cleanupStuckJobs(maxAge);
-    return { cleaned };
+    return this.jobsService.cleanupStuckJobs(maxAge);
   }
 }

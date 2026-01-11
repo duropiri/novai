@@ -1,9 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { InjectQueue } from '@nestjs/bullmq';
-import { Queue } from 'bullmq';
 import { SupabaseService, DbLoraModel } from '../files/supabase.service';
 import { JobsService } from '../jobs/jobs.service';
-import { QUEUES } from '../jobs/queues.constants';
 
 export interface CreateLoraDto {
   name: string;
@@ -35,7 +32,6 @@ export class LoraService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly jobsService: JobsService,
-    @InjectQueue(QUEUES.LORA_TRAINING) private readonly loraQueue: Queue,
   ) {}
 
   private checkInitialized(): void {
@@ -62,23 +58,16 @@ export class LoraService {
       error_message: null,
     });
 
-    // Create a job record for tracking
-    const job = await this.jobsService.createJob('lora_training', loraModel.id, {
+    // Create a job record and enqueue it
+    // Use createAndEnqueueJob since LoRA processor doesn't need custom job names
+    const job = await this.jobsService.createAndEnqueueJob('lora_training', loraModel.id, {
+      loraModelId: loraModel.id, // Include this - the processor needs it!
       imagesZipUrl: dto.imagesZipUrl,
       triggerWord: dto.triggerWord,
       steps: dto.steps || 1000,
     });
 
-    // Queue the training job
-    await this.loraQueue.add('train', {
-      jobId: job.id,
-      loraModelId: loraModel.id,
-      imagesZipUrl: dto.imagesZipUrl,
-      triggerWord: dto.triggerWord,
-      steps: dto.steps || 1000,
-    });
-
-    this.logger.log(`LoRA model ${loraModel.id} queued for training`);
+    this.logger.log(`LoRA model ${loraModel.id} queued for training (job: ${job.id})`);
 
     return loraModel;
   }
@@ -223,6 +212,76 @@ export class LoraService {
     return loraModel;
   }
 
+  /**
+   * Force delete a stuck LoRA model (training/pending status)
+   */
+  async forceDelete(id: string): Promise<void> {
+    this.checkInitialized();
+    const model = await this.supabase.getLoraModel(id);
+    if (!model) {
+      throw new Error('LoRA model not found');
+    }
+
+    this.logger.log(`Force deleting LoRA model ${id} (status: ${model.status})`);
+
+    // Delete associated files from storage if they exist
+    if (model.weights_url) {
+      try {
+        const weightsPath = this.extractPathFromUrl(model.weights_url);
+        if (weightsPath) {
+          await this.supabase.deleteFile('lora-weights', weightsPath);
+        }
+      } catch (error) {
+        this.logger.warn(`Failed to delete weights file: ${error}`);
+      }
+    }
+
+    // Delete from database
+    await this.supabase.getClient()
+      .from('lora_models')
+      .delete()
+      .eq('id', id);
+
+    this.logger.log(`Force deleted LoRA model ${id}`);
+  }
+
+  /**
+   * Clean up all stuck LoRA models (training/pending for too long)
+   */
+  async cleanupStuck(maxAgeMinutes = 60): Promise<{ deleted: number; ids: string[] }> {
+    this.checkInitialized();
+
+    // Get all stuck models
+    const stuckModels = await this.supabase.getClient()
+      .from('lora_models')
+      .select('id, name, status, created_at')
+      .in('status', ['training', 'pending']);
+
+    if (stuckModels.error) {
+      throw new Error(`Failed to query stuck models: ${stuckModels.error.message}`);
+    }
+
+    const cutoffTime = new Date(Date.now() - maxAgeMinutes * 60 * 1000);
+    const modelsToDelete = (stuckModels.data || []).filter((m) => {
+      const createdAt = new Date(m.created_at);
+      return createdAt < cutoffTime;
+    });
+
+    this.logger.log(`Found ${modelsToDelete.length} stuck LoRA models to clean up`);
+
+    const deletedIds: string[] = [];
+    for (const model of modelsToDelete) {
+      try {
+        await this.forceDelete(model.id);
+        deletedIds.push(model.id);
+      } catch (error) {
+        this.logger.error(`Failed to delete stuck model ${model.id}: ${error}`);
+      }
+    }
+
+    return { deleted: deletedIds.length, ids: deletedIds };
+  }
+
   async delete(id: string): Promise<void> {
     this.checkInitialized();
     const model = await this.supabase.getLoraModel(id);
@@ -232,7 +291,7 @@ export class LoraService {
 
     // Only allow deletion of completed or failed models
     if (model.status === 'training' || model.status === 'pending') {
-      throw new Error('Cannot delete a model that is still training');
+      throw new Error('Cannot delete a model that is still training. Use force delete instead.');
     }
 
     // Delete associated files from storage if they exist

@@ -6,20 +6,22 @@ import { SupabaseService } from '../files/supabase.service';
 import { QUEUES } from '../jobs/queues.constants';
 
 export interface CreateImageGenerationDto {
-  loraId: string;
-  prompt?: string; // Optional when using source image
-  sourceImageUrl?: string; // Optional source image for img2img
+  loraId?: string;
+  characterDiagramId?: string;
+  prompt?: string;
+  sourceImageUrl?: string;
   aspectRatio?: '1:1' | '16:9' | '9:16' | '4:5' | '3:4';
   numImages: number;
-  loraStrength: number;
-  imageStrength?: number; // How much to preserve source image (0-1)
+  loraStrength?: number;
+  imageStrength?: number;
 }
 
 export interface ImageGenerationResult {
   jobId: string;
-  loraId: string;
+  loraId?: string;
+  characterDiagramId?: string;
   estimatedCostCents: number;
-  mode: 'text-to-image' | 'image-to-image';
+  mode: 'text-to-image' | 'face-swap' | 'character-diagram-swap';
 }
 
 export interface GeneratedImage {
@@ -39,73 +41,96 @@ export class ImageGenerationService {
   ) {}
 
   async createImageGeneration(dto: CreateImageGenerationDto): Promise<ImageGenerationResult> {
-    // Validate: need either prompt or source image
-    if (!dto.prompt?.trim() && !dto.sourceImageUrl) {
-      throw new Error('Either a prompt or source image is required');
+    // Determine mode based on identity source
+    let mode: 'text-to-image' | 'face-swap' | 'character-diagram-swap';
+    let referenceId: string;
+    let jobPayload: Record<string, unknown>;
+
+    if (dto.characterDiagramId) {
+      // Character Diagram mode - face swap only
+      const diagram = await this.supabase.getCharacterDiagram(dto.characterDiagramId);
+      if (!diagram) {
+        throw new Error('Character Diagram not found');
+      }
+      if (diagram.status !== 'ready' || !diagram.file_url) {
+        throw new Error('Character Diagram is not ready');
+      }
+
+      mode = 'character-diagram-swap';
+      referenceId = dto.characterDiagramId;
+      jobPayload = {
+        characterDiagramId: dto.characterDiagramId,
+        characterDiagramUrl: diagram.file_url,
+        prompt: dto.prompt,
+        sourceImageUrl: dto.sourceImageUrl,
+        numImages: dto.numImages,
+        imageStrength: dto.imageStrength,
+        mode,
+      };
+    } else if (dto.loraId) {
+      // LoRA mode - text-to-image or face-swap
+      const lora = await this.supabase.getLoraModel(dto.loraId);
+      if (!lora) {
+        throw new Error('LoRA model not found');
+      }
+      if (lora.status !== 'ready' || !lora.weights_url) {
+        throw new Error('LoRA model is not ready');
+      }
+
+      mode = dto.sourceImageUrl ? 'face-swap' : 'text-to-image';
+      referenceId = dto.loraId;
+      jobPayload = {
+        loraId: dto.loraId,
+        loraWeightsUrl: lora.weights_url,
+        loraTriggerWord: lora.trigger_word,
+        prompt: dto.prompt,
+        sourceImageUrl: dto.sourceImageUrl,
+        aspectRatio: dto.aspectRatio,
+        numImages: dto.numImages,
+        loraStrength: dto.loraStrength ?? 0.8,
+        imageStrength: dto.imageStrength,
+        mode,
+      };
+    } else {
+      throw new Error('Either LoRA or Character Diagram is required');
     }
 
-    // Get LoRA model details
-    const lora = await this.supabase.getLoraModel(dto.loraId);
-    if (!lora) {
-      throw new Error('LoRA model not found');
-    }
-
-    if (lora.status !== 'ready' || !lora.weights_url) {
-      throw new Error('LoRA model is not ready');
-    }
-
-    const mode = dto.sourceImageUrl ? 'image-to-image' : 'text-to-image';
-
-    // Calculate estimated cost: ~$0.03 per image for FLUX LoRA
-    // img2img is same price as txt2img
-    const estimatedCostCents = Math.ceil(dto.numImages * 3);
+    // Calculate estimated cost:
+    // - Text-to-image: ~$0.03 per image for FLUX LoRA
+    // - Face swap with LoRA: ~$0.04 per image (includes generating reference face + swap)
+    // - Character Diagram swap: ~$0.04 per image (just face swap, no generation)
+    const costPerImage = mode === 'text-to-image' ? 3 : 4;
+    const estimatedCostCents = Math.ceil(dto.numImages * costPerImage);
 
     this.logger.log(`Creating image generation job`, {
       loraId: dto.loraId,
+      characterDiagramId: dto.characterDiagramId,
       mode,
       prompt: dto.prompt?.substring(0, 50),
       sourceImageUrl: dto.sourceImageUrl ? 'provided' : 'none',
       aspectRatio: dto.aspectRatio,
       numImages: dto.numImages,
-      loraStrength: dto.loraStrength,
-      imageStrength: dto.imageStrength,
       estimatedCostCents,
     });
 
     // Create job record
-    const job = await this.jobsService.createJob('image_generation', dto.loraId, {
-      loraId: dto.loraId,
-      loraWeightsUrl: lora.weights_url,
-      loraTriggerWord: lora.trigger_word,
-      prompt: dto.prompt,
-      sourceImageUrl: dto.sourceImageUrl,
-      aspectRatio: dto.aspectRatio,
-      numImages: dto.numImages,
-      loraStrength: dto.loraStrength,
-      imageStrength: dto.imageStrength,
-      mode,
-    });
+    const job = await this.jobsService.createJob('image_generation', referenceId, jobPayload);
 
     // Queue the image generation job
     await this.imageGenQueue.add('generate', {
       jobId: job.id,
-      loraId: dto.loraId,
-      loraWeightsUrl: lora.weights_url,
-      loraTriggerWord: lora.trigger_word,
-      prompt: dto.prompt,
-      sourceImageUrl: dto.sourceImageUrl,
-      aspectRatio: dto.aspectRatio,
-      numImages: dto.numImages,
-      loraStrength: dto.loraStrength,
-      imageStrength: dto.imageStrength,
-      mode,
+      ...jobPayload,
     });
+
+    // Update job status to queued
+    await this.jobsService.updateJob(job.id, { status: 'queued' });
 
     this.logger.log(`Image generation job queued: ${job.id}`);
 
     return {
       jobId: job.id,
       loraId: dto.loraId,
+      characterDiagramId: dto.characterDiagramId,
       estimatedCostCents,
       mode,
     };
@@ -157,5 +182,37 @@ export class ImageGenerationService {
         createdAt: job.created_at,
       };
     });
+  }
+
+  async deleteGeneration(jobId: string): Promise<void> {
+    const job = await this.supabase.getJob(jobId);
+    if (!job) {
+      throw new Error('Job not found');
+    }
+
+    // Delete generated images from storage if they exist
+    const outputPayload = job.output_payload as { images?: GeneratedImage[] } | null;
+    if (outputPayload?.images) {
+      for (const image of outputPayload.images) {
+        try {
+          // Extract path from URL and delete from storage
+          // The URL format is typically: https://xxx.supabase.co/storage/v1/object/public/bucket/path
+          const urlParts = image.url.split('/');
+          const bucketIndex = urlParts.indexOf('public');
+          if (bucketIndex > -1 && bucketIndex + 2 < urlParts.length) {
+            const bucket = urlParts[bucketIndex + 1];
+            const path = urlParts.slice(bucketIndex + 2).join('/');
+            await this.supabase.deleteFile(bucket, path);
+          }
+        } catch (error) {
+          this.logger.warn(`Failed to delete image file: ${error}`);
+          // Continue deleting other files even if one fails
+        }
+      }
+    }
+
+    // Delete the job record
+    await this.supabase.deleteJob(jobId);
+    this.logger.log(`Deleted image generation job: ${jobId}`);
   }
 }

@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
-import { Loader2, Video, User, Sparkles, Download, Play, ExternalLink, Settings, ChevronDown, ChevronUp, XCircle } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { Loader2, Video, User, Sparkles, Download, Play, ExternalLink, Settings, ChevronDown, ChevronUp, XCircle, Trash2, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -20,6 +20,7 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogFooter,
 } from '@/components/ui/dialog';
 import {
   Collapsible,
@@ -55,7 +56,10 @@ export default function AISwapperPage() {
   const [selectedDiagram, setSelectedDiagram] = useState<CharacterDiagram | null>(null);
   const [selectedLora, setSelectedLora] = useState<LoraModel | null>(null);
 
-  // WAN settings
+  // Swap method selection
+  const [swapMethod, setSwapMethod] = useState<'wan_replace' | 'face_swap'>('wan_replace');
+
+  // WAN settings (only used for wan_replace method)
   const [resolution, setResolution] = useState<'480p' | '580p' | '720p'>('720p');
   const [videoQuality, setVideoQuality] = useState<'low' | 'medium' | 'high' | 'maximum'>('high');
   const [useTurbo, setUseTurbo] = useState(true);
@@ -75,8 +79,12 @@ export default function AISwapperPage() {
   const [isLoadingJobs, setIsLoadingJobs] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
 
-  // Preview modal
+  // Ref to prevent duplicate submissions (React state updates are async)
+  const isSubmittingRef = useRef(false);
+
+  // Preview modals
   const [previewVideo, setPreviewVideo] = useState<VideoType | null>(null);
+  const [previewSourceVideo, setPreviewSourceVideo] = useState<VideoType | null>(null);
 
   // Fetch data
   const fetchVideos = useCallback(async () => {
@@ -115,6 +123,9 @@ export default function AISwapperPage() {
   const fetchJobs = useCallback(async () => {
     try {
       const data = await jobsApi.list('face_swap');
+      // DEBUG: Log job statuses to see if frontend is receiving updates
+      const jobStatuses = data.slice(0, 5).map(j => `${j.id.slice(0, 8)}: ${j.status} (${j.progress}%)`);
+      console.log('[Swap Page] Job statuses:', jobStatuses);
       setRecentJobs(data.slice(0, 10));
     } catch (error) {
       console.error('Failed to fetch jobs:', error);
@@ -134,14 +145,25 @@ export default function AISwapperPage() {
     return () => clearInterval(interval);
   }, [fetchVideos, fetchDiagrams, fetchLoras, fetchJobs]);
 
-  // Calculate estimated cost (WAN Animate Replace pricing)
+  // Calculate estimated cost based on swap method
   const durationSeconds = selectedVideo?.duration_seconds || 0;
+  const fps = 30; // Assume 30fps for face swap frame count
+  const frameCount = Math.ceil(durationSeconds * fps);
+
+  // WAN: per-second pricing, Face Swap: per-frame pricing (~$0.005/frame)
   const costPerSecond = WAN_COST_PER_SECOND[resolution] || 8;
+  const faceSwapCostPerFrame = 0.5; // $0.005/frame = 0.5 cents
+
   const estimatedCost = durationSeconds > 0
-    ? ((durationSeconds * costPerSecond) / 100).toFixed(2)
+    ? swapMethod === 'wan_replace'
+      ? ((durationSeconds * costPerSecond) / 100).toFixed(2)
+      : ((frameCount * faceSwapCostPerFrame) / 100).toFixed(2)
     : '0.00';
+
   const costDescription = durationSeconds > 0
-    ? `$${(costPerSecond / 100).toFixed(2)}/sec at ${resolution}`
+    ? swapMethod === 'wan_replace'
+      ? `$${(costPerSecond / 100).toFixed(2)}/sec at ${resolution}`
+      : `~${frameCount} frames at $0.005/frame`
     : '';
 
   const handleGenerate = async () => {
@@ -154,6 +176,13 @@ export default function AISwapperPage() {
       return;
     }
 
+    // Prevent duplicate submissions using ref (immediate check, before async state update)
+    if (isSubmittingRef.current) {
+      console.log('[Swap Page] Blocked duplicate submission attempt');
+      return;
+    }
+    isSubmittingRef.current = true;
+
     setIsGenerating(true);
 
     try {
@@ -161,10 +190,12 @@ export default function AISwapperPage() {
         videoId: selectedVideo.id,
         characterDiagramId: selectedDiagram.id,
         loraId: selectedLora?.id,
-        resolution,
-        videoQuality,
-        useTurbo,
-        inferenceSteps,
+        swapMethod,
+        // WAN settings (only used for wan_replace)
+        resolution: swapMethod === 'wan_replace' ? resolution : undefined,
+        videoQuality: swapMethod === 'wan_replace' ? videoQuality : undefined,
+        useTurbo: swapMethod === 'wan_replace' ? useTurbo : undefined,
+        inferenceSteps: swapMethod === 'wan_replace' ? inferenceSteps : undefined,
       });
 
       toast({
@@ -188,6 +219,7 @@ export default function AISwapperPage() {
       });
     } finally {
       setIsGenerating(false);
+      isSubmittingRef.current = false;
     }
   };
 
@@ -219,6 +251,44 @@ export default function AISwapperPage() {
       fetchJobs();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to cancel job';
+      toast({
+        title: 'Error',
+        description: message,
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const handleRetryJob = async (job: Job) => {
+    try {
+      await swapApi.retry(job.id);
+      toast({
+        title: 'Job Requeued',
+        description: 'The job has been requeued for processing',
+      });
+      fetchJobs();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to retry job';
+      toast({
+        title: 'Error',
+        description: message,
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const handleDeleteJob = async (job: Job) => {
+    if (!confirm('Delete this job? This cannot be undone.')) return;
+
+    try {
+      await swapApi.delete(job.id);
+      setRecentJobs((prev) => prev.filter((j) => j.id !== job.id));
+      toast({
+        title: 'Deleted',
+        description: 'Job deleted successfully',
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to delete job';
       toast({
         title: 'Error',
         description: message,
@@ -290,8 +360,8 @@ export default function AISwapperPage() {
                   {videos.map((video) => (
                     <button
                       key={video.id}
-                      onClick={() => setSelectedVideo(video)}
-                      className={`relative aspect-video rounded-md overflow-hidden border-2 transition-all ${
+                      onClick={() => setPreviewSourceVideo(video)}
+                      className={`relative aspect-video rounded-md overflow-hidden border-2 transition-all group ${
                         selectedVideo?.id === video.id
                           ? 'border-primary ring-2 ring-primary/50'
                           : 'border-transparent hover:border-muted-foreground/50'
@@ -308,9 +378,22 @@ export default function AISwapperPage() {
                           <Video className="w-6 h-6 text-muted-foreground" />
                         </div>
                       )}
-                      <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-xs p-1 truncate">
-                        {formatDuration(video.duration_seconds)}
+                      {/* Play overlay on hover */}
+                      <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                        <Play className="w-8 h-8 text-white" />
                       </div>
+                      {/* Duration badge */}
+                      <span className="absolute bottom-1 right-1 bg-black/70 text-white text-xs px-1.5 py-0.5 rounded">
+                        {formatDuration(video.duration_seconds)}
+                      </span>
+                      {/* Selected checkmark */}
+                      {selectedVideo?.id === video.id && (
+                        <div className="absolute top-1 right-1 bg-primary rounded-full p-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                          </svg>
+                        </div>
+                      )}
                     </button>
                   ))}
                 </div>
@@ -433,10 +516,68 @@ export default function AISwapperPage() {
             </CardContent>
           </Card>
 
-          {/* 4. Settings & Generate */}
+          {/* 4. Swap Method */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-lg">4. Swap Method</CardTitle>
+              <CardDescription>Choose how the face swap is performed</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div
+                onClick={() => setSwapMethod('wan_replace')}
+                className={`p-3 rounded-lg border-2 cursor-pointer transition-all ${
+                  swapMethod === 'wan_replace'
+                    ? 'border-primary bg-primary/5'
+                    : 'border-muted hover:border-muted-foreground/50'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                    swapMethod === 'wan_replace' ? 'border-primary' : 'border-muted-foreground'
+                  }`}>
+                    {swapMethod === 'wan_replace' && (
+                      <div className="w-2 h-2 rounded-full bg-primary" />
+                    )}
+                  </div>
+                  <span className="font-medium">WAN Animate Replace</span>
+                  <Badge variant="secondary" className="ml-auto">Faster</Badge>
+                </div>
+                <p className="text-sm text-muted-foreground mt-1 ml-6">
+                  AI regenerates the video with your character. May alter motion slightly.
+                </p>
+              </div>
+
+              <div
+                onClick={() => setSwapMethod('face_swap')}
+                className={`p-3 rounded-lg border-2 cursor-pointer transition-all ${
+                  swapMethod === 'face_swap'
+                    ? 'border-primary bg-primary/5'
+                    : 'border-muted hover:border-muted-foreground/50'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                    swapMethod === 'face_swap' ? 'border-primary' : 'border-muted-foreground'
+                  }`}>
+                    {swapMethod === 'face_swap' && (
+                      <div className="w-2 h-2 rounded-full bg-primary" />
+                    )}
+                  </div>
+                  <span className="font-medium">Frame-by-Frame Face Swap</span>
+                  <Badge variant="outline" className="ml-auto">Precise</Badge>
+                </div>
+                <p className="text-sm text-muted-foreground mt-1 ml-6">
+                  Swaps face in each frame. Preserves original motion exactly.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* 5. Settings & Generate */}
           <Card>
             <CardContent className="pt-6 space-y-4">
-              {/* Advanced Settings */}
+              {/* Advanced Settings (only for WAN method) */}
+              {swapMethod === 'wan_replace' && (
               <Collapsible open={showAdvanced} onOpenChange={setShowAdvanced}>
                 <CollapsibleTrigger asChild>
                   <Button variant="ghost" size="sm" className="w-full justify-between">
@@ -507,6 +648,7 @@ export default function AISwapperPage() {
                     </div>
                   </CollapsibleContent>
                 </Collapsible>
+              )}
 
               {/* Cost Display */}
               <div className="border-t pt-4">
@@ -600,7 +742,7 @@ export default function AISwapperPage() {
                     </div>
                     <div className="flex gap-1">
                       {/* Cancel button for pending/queued/processing jobs */}
-                      {['pending', 'queued', 'processing'].includes(job.status) && (
+                      {['pending', 'queued', 'processing'].includes(job.status) && !isJobStuck(job) && (
                         <Button
                           variant="ghost"
                           size="icon"
@@ -609,6 +751,18 @@ export default function AISwapperPage() {
                           className="text-muted-foreground hover:text-destructive"
                         >
                           <XCircle className="w-4 h-4" />
+                        </Button>
+                      )}
+                      {/* Retry button for failed or stuck jobs */}
+                      {(job.status === 'failed' || isJobStuck(job)) && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          title="Retry job"
+                          onClick={() => handleRetryJob(job)}
+                          className="text-muted-foreground hover:text-primary"
+                        >
+                          <RotateCcw className="w-4 h-4" />
                         </Button>
                       )}
                       {/* Preview buttons for completed jobs */}
@@ -637,6 +791,16 @@ export default function AISwapperPage() {
                           </Button>
                         </>
                       )}
+                      {/* Delete button for all jobs */}
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        title="Delete job"
+                        onClick={() => handleDeleteJob(job)}
+                        className="text-muted-foreground hover:text-destructive"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
                     </div>
                   </div>
                 ))}
@@ -646,7 +810,7 @@ export default function AISwapperPage() {
         </Card>
       </div>
 
-      {/* Preview Dialog */}
+      {/* Preview Dialog - Job Results */}
       <Dialog open={!!previewVideo} onOpenChange={(open) => !open && setPreviewVideo(null)}>
         <DialogContent className="max-w-4xl">
           <DialogHeader>
@@ -678,6 +842,41 @@ export default function AISwapperPage() {
               </div>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Source Video Preview Dialog */}
+      <Dialog open={!!previewSourceVideo} onOpenChange={(open) => !open && setPreviewSourceVideo(null)}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>{previewSourceVideo?.name || 'Preview Video'}</DialogTitle>
+          </DialogHeader>
+          {previewSourceVideo && (
+            <div className="space-y-4">
+              <div className="aspect-video bg-black rounded-lg overflow-hidden">
+                <video
+                  src={previewSourceVideo.file_url}
+                  controls
+                  autoPlay
+                  className="w-full h-full"
+                />
+              </div>
+              <p className="text-sm text-muted-foreground text-center">
+                Duration: {formatDuration(previewSourceVideo.duration_seconds)}
+              </p>
+            </div>
+          )}
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" onClick={() => setPreviewSourceVideo(null)}>
+              Cancel
+            </Button>
+            <Button onClick={() => {
+              setSelectedVideo(previewSourceVideo);
+              setPreviewSourceVideo(null);
+            }}>
+              Select This Video
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

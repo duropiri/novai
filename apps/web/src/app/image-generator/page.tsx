@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Loader2, Sparkles, Download, ImageIcon, ExternalLink, Check, Upload, X } from 'lucide-react';
+import { Loader2, Sparkles, Download, ImageIcon, ExternalLink, Check, Upload, X, User, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -24,12 +24,16 @@ import {
 import { useToast } from '@/components/ui/use-toast';
 import {
   loraApi,
+  characterApi,
   imageGenApi,
   filesApi,
   type LoraModel,
+  type CharacterDiagram,
   type ImageGenerationJob,
   type GeneratedImage,
 } from '@/lib/api';
+
+type IdentitySource = 'lora' | 'character-diagram';
 
 const ASPECT_RATIOS = [
   { value: '1:1', label: '1:1 (Square)' },
@@ -45,8 +49,12 @@ export default function ImageGeneratorPage() {
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Form state
+  // Identity source selection
+  const [identitySource, setIdentitySource] = useState<IdentitySource>('lora');
   const [selectedLora, setSelectedLora] = useState<LoraModel | null>(null);
+  const [selectedDiagram, setSelectedDiagram] = useState<CharacterDiagram | null>(null);
+
+  // Form state
   const [prompt, setPrompt] = useState('');
   const [sourceImage, setSourceImage] = useState<{ url: string; file?: File } | null>(null);
   const [aspectRatio, setAspectRatio] = useState<'1:1' | '16:9' | '9:16' | '4:5' | '3:4'>('9:16');
@@ -56,10 +64,12 @@ export default function ImageGeneratorPage() {
 
   // Data
   const [loras, setLoras] = useState<LoraModel[]>([]);
+  const [diagrams, setDiagrams] = useState<CharacterDiagram[]>([]);
   const [recentJobs, setRecentJobs] = useState<ImageGenerationJob[]>([]);
 
   // Loading states
   const [isLoadingLoras, setIsLoadingLoras] = useState(true);
+  const [isLoadingDiagrams, setIsLoadingDiagrams] = useState(true);
   const [isLoadingJobs, setIsLoadingJobs] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
@@ -80,6 +90,17 @@ export default function ImageGeneratorPage() {
     }
   }, []);
 
+  const fetchDiagrams = useCallback(async () => {
+    try {
+      const data = await characterApi.list('ready');
+      setDiagrams(data);
+    } catch (error) {
+      console.error('Failed to fetch diagrams:', error);
+    } finally {
+      setIsLoadingDiagrams(false);
+    }
+  }, []);
+
   const fetchJobs = useCallback(async () => {
     try {
       const data = await imageGenApi.getHistory(20);
@@ -93,15 +114,21 @@ export default function ImageGeneratorPage() {
 
   useEffect(() => {
     fetchLoras();
+    fetchDiagrams();
     fetchJobs();
 
     // Poll for job updates
     const interval = setInterval(fetchJobs, 5000);
     return () => clearInterval(interval);
-  }, [fetchLoras, fetchJobs]);
+  }, [fetchLoras, fetchDiagrams, fetchJobs]);
 
-  // Calculate estimated cost (~$0.03 per image)
-  const estimatedCost = (numImages * 0.03).toFixed(2);
+  // Calculate estimated cost
+  // Flux PuLID (Character Diagram): ~$0.04 per image
+  // LoRA Face swap: ~$0.04 per image
+  // LoRA Text-to-image: ~$0.03 per image
+  const isPulidOrFaceSwap = sourceImage || identitySource === 'character-diagram';
+  const costPerImage = isPulidOrFaceSwap ? 0.04 : 0.03;
+  const estimatedCost = (numImages * costPerImage).toFixed(2);
 
   // Handle source image upload
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -147,7 +174,8 @@ export default function ImageGeneratorPage() {
   };
 
   const handleGenerate = async () => {
-    if (!selectedLora) {
+    // Validate identity source selection
+    if (identitySource === 'lora' && !selectedLora) {
       toast({
         title: 'Missing Selection',
         description: 'Please select a LoRA model',
@@ -155,9 +183,27 @@ export default function ImageGeneratorPage() {
       });
       return;
     }
+    if (identitySource === 'character-diagram' && !selectedDiagram) {
+      toast({
+        title: 'Missing Selection',
+        description: 'Please select a Character Diagram',
+        variant: 'destructive',
+      });
+      return;
+    }
 
-    // Need either prompt or source image
-    if (!prompt.trim() && !sourceImage) {
+    // Character Diagram mode requires prompt (uses Flux PuLID for identity-preserving generation)
+    if (identitySource === 'character-diagram' && !prompt.trim()) {
+      toast({
+        title: 'Missing Prompt',
+        description: 'Please describe what you want to generate (e.g., "portrait in a coffee shop, smiling")',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    // LoRA mode needs either prompt or source image
+    if (identitySource === 'lora' && !prompt.trim() && !sourceImage) {
       toast({
         title: 'Missing Input',
         description: 'Please enter a prompt or upload a source image',
@@ -178,16 +224,20 @@ export default function ImageGeneratorPage() {
       }
 
       const result = await imageGenApi.create({
-        loraId: selectedLora.id,
+        ...(identitySource === 'lora'
+          ? { loraId: selectedLora!.id, loraStrength }
+          : { characterDiagramId: selectedDiagram!.id }),
         prompt: prompt.trim() || undefined,
         sourceImageUrl,
-        aspectRatio: sourceImageUrl ? undefined : aspectRatio,
+        // Always pass aspectRatio for character diagram mode or LoRA text-to-image
+        aspectRatio: identitySource === 'character-diagram' || !sourceImageUrl ? aspectRatio : undefined,
         numImages,
-        loraStrength,
         imageStrength: sourceImageUrl ? imageStrength : undefined,
       });
 
-      const modeText = result.mode === 'image-to-image' ? 'image transformation' : 'image generation';
+      const modeText = result.mode === 'character-diagram-swap' ? 'identity generation (Flux PuLID)'
+        : result.mode === 'face-swap' ? 'face swap'
+        : 'image generation';
       toast({
         title: 'Generation Started',
         description: `Starting ${modeText}. Estimated cost: $${(result.estimatedCostCents / 100).toFixed(2)}`,
@@ -217,6 +267,26 @@ export default function ImageGeneratorPage() {
     setPreviewPrompt(job.prompt || '');
   };
 
+  const handleDeleteJob = async (jobId: string) => {
+    if (!confirm('Delete this generation? This cannot be undone.')) return;
+
+    try {
+      await imageGenApi.delete(jobId);
+      setRecentJobs((prev) => prev.filter((j) => j.jobId !== jobId));
+      toast({
+        title: 'Deleted',
+        description: 'Generation deleted successfully',
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to delete';
+      toast({
+        title: 'Error',
+        description: message,
+        variant: 'destructive',
+      });
+    }
+  };
+
   const getJobStatusBadge = (status: string) => {
     switch (status) {
       case 'pending':
@@ -243,8 +313,13 @@ export default function ImageGeneratorPage() {
     }
   };
 
-  // Can generate if we have a LoRA and either a prompt or source image
-  const canGenerate = selectedLora && (prompt.trim() || sourceImage) && !isGenerating;
+  // Can generate based on identity source:
+  // - LoRA mode: need LoRA AND (prompt OR source image)
+  // - Character Diagram mode: need diagram AND source image
+  const canGenerate =
+    (identitySource === 'lora' && selectedLora && (prompt.trim() || sourceImage)) ||
+    (identitySource === 'character-diagram' && selectedDiagram && sourceImage);
+  const canGenerateNow = canGenerate && !isGenerating;
 
   return (
     <div className="space-y-6">
@@ -258,78 +333,169 @@ export default function ImageGeneratorPage() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Left Column - Form */}
         <div className="space-y-4">
-          {/* 1. Select LoRA Model */}
+          {/* 1. Select Identity Source */}
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-lg">
-                <Sparkles className="w-5 h-5" />
-                1. Select Model (LoRA)
+                {identitySource === 'lora' ? <Sparkles className="w-5 h-5" /> : <User className="w-5 h-5" />}
+                1. Select Identity Source
                 <Badge variant="secondary" className="ml-1">Required</Badge>
-                {selectedLora && <Badge variant="outline" className="ml-auto">Selected</Badge>}
+                {(selectedLora || selectedDiagram) && <Badge variant="outline" className="ml-auto">Selected</Badge>}
               </CardTitle>
-              <CardDescription>Choose a trained LoRA model for generation</CardDescription>
+              <CardDescription>
+                Choose a LoRA model or Character Diagram for face identity
+              </CardDescription>
             </CardHeader>
-            <CardContent>
-              {isLoadingLoras ? (
-                <div className="flex items-center justify-center py-8">
-                  <Loader2 className="w-6 h-6 animate-spin" />
-                </div>
-              ) : loras.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground">
-                  <p>No LoRA models found</p>
-                  <p className="text-sm">Train or upload a LoRA model first</p>
-                </div>
+            <CardContent className="space-y-4">
+              {/* Toggle between LoRA and Character Diagram */}
+              <div className="flex gap-2">
+                <Button
+                  variant={identitySource === 'lora' ? 'default' : 'outline'}
+                  size="sm"
+                  className="flex-1"
+                  onClick={() => {
+                    setIdentitySource('lora');
+                    setSelectedDiagram(null);
+                  }}
+                >
+                  <Sparkles className="w-4 h-4 mr-2" />
+                  LoRA Model
+                </Button>
+                <Button
+                  variant={identitySource === 'character-diagram' ? 'default' : 'outline'}
+                  size="sm"
+                  className="flex-1"
+                  onClick={() => {
+                    setIdentitySource('character-diagram');
+                    setSelectedLora(null);
+                  }}
+                >
+                  <User className="w-4 h-4 mr-2" />
+                  Character Diagram
+                </Button>
+              </div>
+
+              {/* Show appropriate selector based on identity source */}
+              {identitySource === 'lora' ? (
+                // LoRA selector
+                <>
+                  {isLoadingLoras ? (
+                    <div className="flex items-center justify-center py-8">
+                      <Loader2 className="w-6 h-6 animate-spin" />
+                    </div>
+                  ) : loras.length === 0 ? (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <p>No LoRA models found</p>
+                      <p className="text-sm">Train or upload a LoRA model first</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-3 gap-2 max-h-48 overflow-y-auto">
+                      {loras.map((lora) => (
+                        <button
+                          key={lora.id}
+                          onClick={() => setSelectedLora(lora)}
+                          className={`relative aspect-square rounded-md overflow-hidden border-2 transition-all ${
+                            selectedLora?.id === lora.id
+                              ? 'border-primary ring-2 ring-primary/50'
+                              : 'border-transparent hover:border-muted-foreground/50'
+                          }`}
+                        >
+                          {lora.thumbnail_url ? (
+                            <img
+                              src={lora.thumbnail_url}
+                              alt={lora.name}
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <div className="w-full h-full bg-muted flex items-center justify-center">
+                              <Sparkles className="w-6 h-6 text-muted-foreground" />
+                            </div>
+                          )}
+                          <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-xs p-1 truncate text-center">
+                            {lora.name}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {selectedLora && (
+                    <div className="p-2 bg-muted rounded-md">
+                      <p className="text-sm font-medium truncate">{selectedLora.name}</p>
+                      <p className="text-xs text-muted-foreground">
+                        Trigger word: <code className="bg-background px-1 rounded">{selectedLora.trigger_word}</code>
+                      </p>
+                    </div>
+                  )}
+                </>
               ) : (
-                <div className="grid grid-cols-3 gap-2 max-h-48 overflow-y-auto">
-                  {loras.map((lora) => (
-                    <button
-                      key={lora.id}
-                      onClick={() => setSelectedLora(lora)}
-                      className={`relative aspect-square rounded-md overflow-hidden border-2 transition-all ${
-                        selectedLora?.id === lora.id
-                          ? 'border-primary ring-2 ring-primary/50'
-                          : 'border-transparent hover:border-muted-foreground/50'
-                      }`}
-                    >
-                      {lora.thumbnail_url ? (
-                        <img
-                          src={lora.thumbnail_url}
-                          alt={lora.name}
-                          className="w-full h-full object-cover"
-                        />
-                      ) : (
-                        <div className="w-full h-full bg-muted flex items-center justify-center">
-                          <Sparkles className="w-6 h-6 text-muted-foreground" />
-                        </div>
-                      )}
-                      <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-xs p-1 truncate text-center">
-                        {lora.name}
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              )}
-              {selectedLora && (
-                <div className="mt-3 p-2 bg-muted rounded-md">
-                  <p className="text-sm font-medium truncate">{selectedLora.name}</p>
-                  <p className="text-xs text-muted-foreground">
-                    Trigger word: <code className="bg-background px-1 rounded">{selectedLora.trigger_word}</code>
-                  </p>
-                </div>
+                // Character Diagram selector
+                <>
+                  {isLoadingDiagrams ? (
+                    <div className="flex items-center justify-center py-8">
+                      <Loader2 className="w-6 h-6 animate-spin" />
+                    </div>
+                  ) : diagrams.length === 0 ? (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <p>No Character Diagrams found</p>
+                      <p className="text-sm">Create a Character Diagram first</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-3 gap-2 max-h-48 overflow-y-auto">
+                      {diagrams.map((diagram) => (
+                        <button
+                          key={diagram.id}
+                          onClick={() => setSelectedDiagram(diagram)}
+                          className={`relative aspect-square rounded-md overflow-hidden border-2 transition-all ${
+                            selectedDiagram?.id === diagram.id
+                              ? 'border-primary ring-2 ring-primary/50'
+                              : 'border-transparent hover:border-muted-foreground/50'
+                          }`}
+                        >
+                          {diagram.file_url ? (
+                            <img
+                              src={diagram.file_url}
+                              alt={diagram.name}
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <div className="w-full h-full bg-muted flex items-center justify-center">
+                              <User className="w-6 h-6 text-muted-foreground" />
+                            </div>
+                          )}
+                          <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-xs p-1 truncate text-center">
+                            {diagram.name}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {selectedDiagram && (
+                    <div className="p-2 bg-muted rounded-md">
+                      <p className="text-sm font-medium truncate">{selectedDiagram.name}</p>
+                      <p className="text-xs text-muted-foreground">
+                        Uses Flux PuLID for natural identity-preserving generation
+                      </p>
+                    </div>
+                  )}
+                </>
               )}
             </CardContent>
           </Card>
 
-          {/* 2. Source Image (Optional) */}
+          {/* 2. Source Image (Optional - for LoRA face swap mode only) */}
+          {identitySource === 'lora' && (
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-lg">
                 <Upload className="w-5 h-5" />
                 2. Source Image
                 <Badge variant="outline" className="ml-1">Optional</Badge>
+                {sourceImage && <Badge className="ml-auto bg-blue-500/10 text-blue-600 border-blue-500/20">Face Swap Mode</Badge>}
               </CardTitle>
               <CardDescription>
-                Upload an image to recreate with your LoRA model (replaces the person)
+                {sourceImage
+                  ? 'The face in this image will be swapped with your LoRA identity'
+                  : 'Upload an image to swap faces, or skip to generate from text prompt'}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -357,7 +523,7 @@ export default function ImageGeneratorPage() {
                     <X className="w-4 h-4" />
                   </Button>
                   <p className="text-xs text-muted-foreground mt-2 text-center">
-                    The person in this image will be replaced with your LoRA character
+                    The face in this image will be replaced with your LoRA identity
                   </p>
                 </div>
               ) : (
@@ -381,21 +547,27 @@ export default function ImageGeneratorPage() {
               )}
             </CardContent>
           </Card>
+          )}
 
-          {/* 3. Prompt */}
+          {/* Prompt - Required for Character Diagram, step 2 or 3 depending on mode */}
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-lg">
                 <ImageIcon className="w-5 h-5" />
-                3. Prompt
-                {!sourceImage && <Badge variant="secondary" className="ml-1">Required</Badge>}
-                {sourceImage && <Badge variant="outline" className="ml-1">Optional</Badge>}
+                {identitySource === 'character-diagram' ? '2' : '3'}. Prompt
+                {identitySource === 'character-diagram' || (identitySource === 'lora' && !sourceImage) ? (
+                  <Badge variant="secondary" className="ml-1">Required</Badge>
+                ) : (
+                  <Badge variant="outline" className="ml-1">Optional</Badge>
+                )}
               </CardTitle>
               <CardDescription>
-                {sourceImage
-                  ? 'Optional: Add a prompt to guide the transformation'
-                  : 'Describe the image you want to generate'}
-                {selectedLora && (
+                {identitySource === 'character-diagram'
+                  ? 'Describe the scene, pose, and style you want (e.g., "portrait in a coffee shop, smiling, natural lighting")'
+                  : sourceImage
+                    ? 'Optional: Add a prompt to guide the transformation'
+                    : 'Describe the image you want to generate'}
+                {identitySource === 'lora' && selectedLora && (
                   <span className="block mt-1 text-xs">
                     Trigger word <code className="bg-muted px-1 rounded">{selectedLora.trigger_word}</code> will be auto-added
                   </span>
@@ -404,9 +576,11 @@ export default function ImageGeneratorPage() {
             </CardHeader>
             <CardContent>
               <Textarea
-                placeholder={sourceImage
-                  ? "Optional: describe any changes you want..."
-                  : "standing on a beach at sunset, professional photo, high quality..."}
+                placeholder={identitySource === 'character-diagram'
+                  ? "professional portrait photo, natural lighting, looking at camera..."
+                  : sourceImage
+                    ? "Optional: describe any changes you want..."
+                    : "standing on a beach at sunset, professional photo, high quality..."}
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
                 rows={3}
@@ -415,14 +589,15 @@ export default function ImageGeneratorPage() {
             </CardContent>
           </Card>
 
-          {/* 4. Settings */}
+          {/* Settings */}
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-lg">4. Settings</CardTitle>
+              <CardTitle className="text-lg">{identitySource === 'character-diagram' ? '3' : '4'}. Settings</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                {!sourceImage && (
+                {/* Show aspect ratio for Character Diagram mode or LoRA text-to-image mode */}
+                {(identitySource === 'character-diagram' || !sourceImage) && (
                   <div className="space-y-2">
                     <Label>Aspect Ratio</Label>
                     <Select
@@ -462,35 +637,34 @@ export default function ImageGeneratorPage() {
                 </div>
               </div>
 
-              <div className="space-y-2">
-                <div className="flex justify-between">
-                  <Label>LoRA Strength</Label>
-                  <span className="text-sm text-muted-foreground">{loraStrength.toFixed(1)}</span>
-                </div>
-                <Slider
-                  value={[loraStrength]}
-                  onValueChange={([value]) => setLoraStrength(value)}
-                  min={0.5}
-                  max={1.0}
-                  step={0.1}
-                />
-              </div>
-
-              {sourceImage && (
+              {/* Only show LoRA strength for LoRA text-to-image mode (not face swap, not Character Diagram) */}
+              {identitySource === 'lora' && !sourceImage && (
                 <div className="space-y-2">
                   <div className="flex justify-between">
-                    <Label>Transformation Strength</Label>
-                    <span className="text-sm text-muted-foreground">{((1 - imageStrength) * 100).toFixed(0)}%</span>
+                    <Label>LoRA Strength</Label>
+                    <span className="text-sm text-muted-foreground">{loraStrength.toFixed(1)}</span>
                   </div>
                   <Slider
-                    value={[1 - imageStrength]}
-                    onValueChange={([value]) => setImageStrength(1 - value)}
-                    min={0}
-                    max={1}
-                    step={0.05}
+                    value={[loraStrength]}
+                    onValueChange={([value]) => setLoraStrength(value)}
+                    min={0.5}
+                    max={1.0}
+                    step={0.1}
                   />
                   <p className="text-xs text-muted-foreground">
-                    Higher = more changes to the original image
+                    How strongly the LoRA influences the generated image
+                  </p>
+                </div>
+              )}
+
+              {/* Face Swap Mode info box */}
+              {(identitySource === 'character-diagram' || sourceImage) && (
+                <div className="p-3 bg-blue-500/5 border border-blue-500/20 rounded-md">
+                  <p className="text-sm text-blue-600 font-medium">Face Swap Mode</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {identitySource === 'character-diagram'
+                      ? 'The face from your Character Diagram will be swapped into the source image.'
+                      : 'A reference face will be generated from your LoRA, then swapped into the source image.'}
                   </p>
                 </div>
               )}
@@ -505,31 +679,35 @@ export default function ImageGeneratorPage() {
                 <span className="text-lg font-semibold">${estimatedCost}</span>
               </div>
               <p className="text-xs text-muted-foreground mb-4">
-                Based on {numImages} image{numImages > 1 ? 's' : ''} (~$0.03 per image)
+                Based on {numImages} image{numImages > 1 ? 's' : ''} (~${costPerImage.toFixed(2)} per image)
               </p>
               <Button
                 onClick={handleGenerate}
-                disabled={!canGenerate}
+                disabled={!canGenerateNow}
                 className="w-full"
                 size="lg"
               >
                 {isGenerating ? (
                   <>
                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    {sourceImage ? 'Transforming...' : 'Generating...'}
+                    Swapping Face...
                   </>
                 ) : (
                   <>
                     <Sparkles className="w-4 h-4 mr-2" />
-                    {sourceImage ? 'Transform Image' : 'Generate Images'}
+                    {identitySource === 'character-diagram' || sourceImage ? 'Swap Face' : 'Generate Images'}
                   </>
                 )}
               </Button>
               {!canGenerate && !isGenerating && (
                 <p className="text-xs text-center text-muted-foreground mt-2">
-                  {!selectedLora
+                  {identitySource === 'lora' && !selectedLora
                     ? 'Select a LoRA model'
-                    : !prompt.trim() && !sourceImage
+                    : identitySource === 'character-diagram' && !selectedDiagram
+                    ? 'Select a Character Diagram'
+                    : identitySource === 'character-diagram' && !sourceImage
+                    ? 'Upload a source image'
+                    : identitySource === 'lora' && !prompt.trim() && !sourceImage
                     ? 'Enter a prompt or upload a source image'
                     : ''}
                 </p>
@@ -565,8 +743,8 @@ export default function ImageGeneratorPage() {
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         {getJobStatusBadge(job.status)}
-                        {job.mode === 'image-to-image' && (
-                          <Badge variant="outline" className="text-xs">img2img</Badge>
+                        {(job.mode === 'face-swap' || job.mode === 'character-diagram-swap') && (
+                          <Badge variant="outline" className="text-xs bg-blue-500/10 text-blue-600 border-blue-500/20">face swap</Badge>
                         )}
                       </div>
                       <span className="text-xs text-muted-foreground">
@@ -605,7 +783,29 @@ export default function ImageGeneratorPage() {
                             <ExternalLink className="w-3 h-3 mr-1" />
                             View
                           </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleDeleteJob(job.jobId)}
+                            className="text-muted-foreground hover:text-destructive"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </Button>
                         </div>
+                      </div>
+                    )}
+                    {/* Delete button for non-completed jobs */}
+                    {job.status !== 'completed' && (
+                      <div className="flex justify-end">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleDeleteJob(job.jobId)}
+                          className="text-muted-foreground hover:text-destructive"
+                        >
+                          <Trash2 className="w-3 h-3 mr-1" />
+                          Delete
+                        </Button>
                       </div>
                     )}
                   </div>

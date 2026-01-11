@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import {
   Dialog,
   DialogContent,
@@ -22,259 +23,400 @@ import {
   Trash2,
   Loader2,
   ExternalLink,
-  Clock,
-  AlertCircle,
-  CheckCircle2,
+  Plus,
+  FolderOpen,
+  Sparkles,
+  User,
+  Images,
 } from 'lucide-react';
-import { characterApi, CharacterDiagram } from '@/lib/api';
+import { cn } from '@/lib/utils';
+import {
+  imageCollectionsApi,
+  type ImageCollection,
+  type ImageItem,
+} from '@/lib/api';
 import Link from 'next/link';
 
 export default function ImagesPage() {
-  const [diagrams, setDiagrams] = useState<CharacterDiagram[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Collections state
+  const [collections, setCollections] = useState<ImageCollection[]>([]);
+  const [activeCollection, setActiveCollection] = useState<string>('all');
+  const [loadingCollections, setLoadingCollections] = useState(true);
+
+  // Images state
+  const [images, setImages] = useState<ImageItem[]>([]);
+  const [loadingImages, setLoadingImages] = useState(true);
 
   // Dialog states
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [deletingDiagram, setDeletingDiagram] = useState<CharacterDiagram | null>(null);
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewDiagram, setPreviewDiagram] = useState<CharacterDiagram | null>(null);
+  const [createCollectionOpen, setCreateCollectionOpen] = useState(false);
+  const [newCollectionName, setNewCollectionName] = useState('');
+  const [creatingCollection, setCreatingCollection] = useState(false);
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewImage, setPreviewImage] = useState<ImageItem | null>(null);
+
+  // Load collections
+  const loadCollections = useCallback(async () => {
     try {
-      const data = await characterApi.list();
-      setDiagrams(data);
+      const data = await imageCollectionsApi.list();
+      setCollections(data);
     } catch (error) {
-      console.error('Failed to load character diagrams:', error);
+      console.error('Failed to load collections:', error);
     } finally {
-      setLoading(false);
+      setLoadingCollections(false);
     }
   }, []);
 
-  useEffect(() => {
-    loadData();
-    // Poll for status updates every 10 seconds
-    const interval = setInterval(() => {
-      loadData();
-    }, 10000);
-    return () => clearInterval(interval);
-  }, [loadData]);
-
-  const handleDelete = async () => {
-    if (!deletingDiagram) return;
-
+  // Load images for selected collection
+  const loadImages = useCallback(async () => {
+    setLoadingImages(true);
     try {
-      await characterApi.delete(deletingDiagram.id);
-      setDeleteDialogOpen(false);
-      setDeletingDiagram(null);
-      await loadData();
+      const data = activeCollection === 'all'
+        ? await imageCollectionsApi.getAllImages()
+        : await imageCollectionsApi.getCollectionImages(activeCollection);
+      setImages(data);
     } catch (error) {
-      console.error('Failed to delete diagram:', error);
-      alert('Failed to delete character diagram');
+      console.error('Failed to load images:', error);
+    } finally {
+      setLoadingImages(false);
+    }
+  }, [activeCollection]);
+
+  useEffect(() => {
+    loadCollections();
+  }, [loadCollections]);
+
+  useEffect(() => {
+    loadImages();
+    // Poll for updates every 10 seconds
+    const interval = setInterval(loadImages, 10000);
+    return () => clearInterval(interval);
+  }, [loadImages]);
+
+  const handleCreateCollection = async () => {
+    if (!newCollectionName.trim()) return;
+
+    setCreatingCollection(true);
+    try {
+      await imageCollectionsApi.create(newCollectionName.trim());
+      setNewCollectionName('');
+      setCreateCollectionOpen(false);
+      await loadCollections();
+    } catch (error) {
+      console.error('Failed to create collection:', error);
+    } finally {
+      setCreatingCollection(false);
     }
   };
 
-  const getStatusBadge = (status: CharacterDiagram['status']) => {
-    switch (status) {
-      case 'ready':
-        return (
-          <span className="flex items-center gap-1 text-xs text-green-600">
-            <CheckCircle2 className="h-3 w-3" />
-            Ready
-          </span>
-        );
-      case 'processing':
-        return (
-          <span className="flex items-center gap-1 text-xs text-blue-600">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            Processing
-          </span>
-        );
-      case 'pending':
-        return (
-          <span className="flex items-center gap-1 text-xs text-yellow-600">
-            <Clock className="h-3 w-3" />
-            Pending
-          </span>
-        );
-      case 'failed':
-        return (
-          <span className="flex items-center gap-1 text-xs text-red-600">
-            <AlertCircle className="h-3 w-3" />
-            Failed
-          </span>
-        );
-      default:
-        return null;
+  const handleDeleteCollection = async (collectionId: string) => {
+    if (!confirm('Delete this collection? Images will not be deleted.')) return;
+
+    try {
+      await imageCollectionsApi.delete(collectionId);
+      if (activeCollection === collectionId) {
+        setActiveCollection('all');
+      }
+      await loadCollections();
+    } catch (error) {
+      console.error('Failed to delete collection:', error);
     }
+  };
+
+  const getCollectionIcon = (collection: ImageCollection) => {
+    if (collection.id === 'smart-character-diagrams') {
+      return <User className="h-4 w-4" />;
+    }
+    if (collection.id === 'smart-generated') {
+      return <Sparkles className="h-4 w-4" />;
+    }
+    return <FolderOpen className="h-4 w-4" />;
   };
 
   const formatDate = (dateStr: string) => {
     return new Date(dateStr).toLocaleDateString('en-US', {
       month: 'short',
       day: 'numeric',
-      year: 'numeric',
     });
   };
 
-  return (
-    <div className="flex-1 space-y-6 p-8">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Images</h1>
-          <p className="text-muted-foreground">
-            Your character diagrams library. Create new diagrams from the Character Diagrams tool.
-          </p>
-        </div>
-        <Button asChild>
-          <Link href="/characters">
-            <ExternalLink className="mr-2 h-4 w-4" />
-            Go to Character Diagrams
-          </Link>
-        </Button>
-      </div>
+  // Separate smart and custom collections
+  const smartCollections = collections.filter((c) => c.type === 'smart');
+  const customCollections = collections.filter((c) => c.type === 'custom');
 
-      {/* Diagrams grid */}
-      {loading ? (
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-        </div>
-      ) : diagrams.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <ImageIcon className="h-12 w-12 text-muted-foreground mb-4" />
-          <h3 className="text-lg font-medium">No character diagrams yet</h3>
-          <p className="text-muted-foreground mt-1 mb-4">
-            Create character diagrams from the Character Diagrams tool
-          </p>
-          <Button asChild>
-            <Link href="/characters">Go to Character Diagrams</Link>
+  // Calculate total count
+  const totalCount = collections.reduce((sum, c) => sum + c.count, 0);
+
+  return (
+    <div className="flex h-full">
+      {/* Sidebar */}
+      <div className="w-64 border-r p-4 flex flex-col">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="font-semibold text-sm text-muted-foreground uppercase tracking-wide">
+            Collections
+          </h2>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            onClick={() => setCreateCollectionOpen(true)}
+          >
+            <Plus className="h-4 w-4" />
           </Button>
         </div>
-      ) : (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {diagrams.map((diagram) => (
-            <div
-              key={diagram.id}
-              className="group relative rounded-lg border bg-card overflow-hidden hover:shadow-md transition-shadow"
-            >
-              {/* Image preview */}
-              <div
-                className="aspect-square bg-muted flex items-center justify-center cursor-pointer"
-                onClick={() => {
-                  if (diagram.file_url) {
-                    setPreviewDiagram(diagram);
-                    setPreviewOpen(true);
-                  }
-                }}
-              >
-                {diagram.file_url ? (
-                  <img
-                    src={diagram.file_url}
-                    alt={diagram.name}
-                    className="w-full h-full object-cover"
-                  />
-                ) : diagram.source_image_url ? (
-                  <img
-                    src={diagram.source_image_url}
-                    alt={diagram.name}
-                    className="w-full h-full object-cover opacity-50"
-                  />
-                ) : (
-                  <ImageIcon className="h-12 w-12 text-muted-foreground" />
-                )}
 
-                {/* Processing overlay */}
-                {diagram.status === 'processing' && (
-                  <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
-                    <Loader2 className="h-8 w-8 animate-spin text-white" />
-                  </div>
-                )}
+        <nav className="space-y-1 flex-1">
+          {/* All Images */}
+          <button
+            onClick={() => setActiveCollection('all')}
+            className={cn(
+              'w-full flex items-center justify-between px-3 py-2 rounded-md text-sm transition-colors',
+              activeCollection === 'all'
+                ? 'bg-muted font-medium'
+                : 'hover:bg-muted/50'
+            )}
+          >
+            <span className="flex items-center gap-2">
+              <Images className="h-4 w-4" />
+              All Images
+            </span>
+            <span className="text-xs text-muted-foreground">{totalCount}</span>
+          </button>
+
+          {/* Smart Collections */}
+          {smartCollections.length > 0 && (
+            <>
+              <div className="pt-4 pb-2">
+                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                  Smart
+                </span>
               </div>
+              {smartCollections.map((collection) => (
+                <button
+                  key={collection.id}
+                  onClick={() => setActiveCollection(collection.id)}
+                  className={cn(
+                    'w-full flex items-center justify-between px-3 py-2 rounded-md text-sm transition-colors',
+                    activeCollection === collection.id
+                      ? 'bg-muted font-medium'
+                      : 'hover:bg-muted/50'
+                  )}
+                >
+                  <span className="flex items-center gap-2">
+                    {getCollectionIcon(collection)}
+                    {collection.name}
+                  </span>
+                  <span className="text-xs text-muted-foreground">{collection.count}</span>
+                </button>
+              ))}
+            </>
+          )}
 
-              {/* Info */}
-              <div className="p-3">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="flex-1 min-w-0">
-                    <h3 className="font-medium truncate">{diagram.name}</h3>
-                    <div className="flex items-center gap-2 mt-1">
-                      {getStatusBadge(diagram.status)}
-                      <span className="text-xs text-muted-foreground">
-                        {formatDate(diagram.created_at)}
-                      </span>
-                    </div>
+          {/* Custom Collections */}
+          {customCollections.length > 0 && (
+            <>
+              <div className="pt-4 pb-2">
+                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                  Custom
+                </span>
+              </div>
+              {customCollections.map((collection) => (
+                <div
+                  key={collection.id}
+                  className={cn(
+                    'group flex items-center justify-between px-3 py-2 rounded-md text-sm transition-colors',
+                    activeCollection === collection.id
+                      ? 'bg-muted font-medium'
+                      : 'hover:bg-muted/50'
+                  )}
+                >
+                  <button
+                    onClick={() => setActiveCollection(collection.id)}
+                    className="flex-1 flex items-center gap-2 text-left"
+                  >
+                    {getCollectionIcon(collection)}
+                    <span className="truncate">{collection.name}</span>
+                  </button>
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs text-muted-foreground">{collection.count}</span>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 opacity-0 group-hover:opacity-100"
+                      onClick={() => handleDeleteCollection(collection.id)}
+                    >
+                      <Trash2 className="h-3 w-3 text-muted-foreground hover:text-destructive" />
+                    </Button>
                   </div>
                 </div>
+              ))}
+            </>
+          )}
 
-                {diagram.error_message && (
-                  <p className="text-xs text-destructive mt-2 line-clamp-2">
-                    {diagram.error_message}
-                  </p>
-                )}
-              </div>
+          {/* Create Collection Button */}
+          <button
+            onClick={() => setCreateCollectionOpen(true)}
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm text-muted-foreground hover:bg-muted/50 transition-colors mt-2"
+          >
+            <Plus className="h-4 w-4" />
+            New Collection
+          </button>
+        </nav>
+      </div>
 
-              {/* Actions */}
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity bg-black/50 hover:bg-black/70 text-white"
-                  >
-                    <MoreVertical className="h-4 w-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem
-                    className="text-destructive"
-                    onClick={() => {
-                      setDeletingDiagram(diagram);
-                      setDeleteDialogOpen(true);
-                    }}
-                  >
-                    <Trash2 className="mr-2 h-4 w-4" />
-                    Delete
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-          ))}
+      {/* Main Content */}
+      <div className="flex-1 p-6 overflow-auto">
+        <div className="flex items-center justify-between mb-6">
+          <div>
+            <h1 className="text-2xl font-bold">
+              {activeCollection === 'all'
+                ? 'All Images'
+                : collections.find((c) => c.id === activeCollection)?.name || 'Images'}
+            </h1>
+            <p className="text-sm text-muted-foreground">
+              {images.length} image{images.length !== 1 ? 's' : ''}
+            </p>
+          </div>
+          <Button asChild variant="outline">
+            <Link href="/characters">
+              <ExternalLink className="mr-2 h-4 w-4" />
+              Character Diagrams
+            </Link>
+          </Button>
         </div>
-      )}
 
-      {/* Delete Confirmation */}
-      <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        {/* Images Grid */}
+        {loadingImages || loadingCollections ? (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+          </div>
+        ) : images.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-12 text-center">
+            <ImageIcon className="h-12 w-12 text-muted-foreground mb-4" />
+            <h3 className="text-lg font-medium">No images yet</h3>
+            <p className="text-muted-foreground mt-1 mb-4">
+              {activeCollection === 'all'
+                ? 'Generate images or create character diagrams to get started'
+                : 'This collection is empty'}
+            </p>
+            <div className="flex gap-2">
+              <Button asChild variant="outline">
+                <Link href="/characters">Create Character Diagram</Link>
+              </Button>
+              <Button asChild>
+                <Link href="/image-generator">Generate Images</Link>
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="grid gap-4 grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+            {images.map((image) => (
+              <div
+                key={image.id}
+                className="group relative rounded-lg border bg-card overflow-hidden hover:shadow-md transition-shadow cursor-pointer"
+                onClick={() => {
+                  setPreviewImage(image);
+                  setPreviewOpen(true);
+                }}
+              >
+                {/* Image */}
+                <div className="aspect-square bg-muted">
+                  <img
+                    src={image.thumbnailUrl || image.imageUrl}
+                    alt={image.name}
+                    className="w-full h-full object-cover"
+                  />
+                </div>
+
+                {/* Info Overlay */}
+                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-3 pt-8">
+                  <p className="text-white text-sm font-medium truncate">{image.name}</p>
+                  <div className="flex items-center gap-2 text-white/70 text-xs">
+                    {image.sourceType === 'character_diagram' && (
+                      <User className="h-3 w-3" />
+                    )}
+                    {image.sourceType === 'generated' && (
+                      <Sparkles className="h-3 w-3" />
+                    )}
+                    <span>{formatDate(image.createdAt)}</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Create Collection Dialog */}
+      <Dialog open={createCollectionOpen} onOpenChange={setCreateCollectionOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete Character Diagram</DialogTitle>
+            <DialogTitle>Create Collection</DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete &quot;{deletingDiagram?.name}&quot;? This action
-              cannot be undone.
+              Create a new collection to organize your images.
             </DialogDescription>
           </DialogHeader>
+          <div className="py-4">
+            <Input
+              placeholder="Collection name"
+              value={newCollectionName}
+              onChange={(e) => setNewCollectionName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  handleCreateCollection();
+                }
+              }}
+            />
+          </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteDialogOpen(false)}>
+            <Button variant="outline" onClick={() => setCreateCollectionOpen(false)}>
               Cancel
             </Button>
-            <Button variant="destructive" onClick={handleDelete}>
-              Delete
+            <Button
+              onClick={handleCreateCollection}
+              disabled={!newCollectionName.trim() || creatingCollection}
+            >
+              {creatingCollection ? (
+                <Loader2 className="h-4 w-4 animate-spin mr-2" />
+              ) : null}
+              Create
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* Image Preview */}
+      {/* Image Preview Dialog */}
       <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
         <DialogContent className="max-w-4xl">
           <DialogHeader>
-            <DialogTitle>{previewDiagram?.name}</DialogTitle>
+            <DialogTitle>{previewImage?.name}</DialogTitle>
           </DialogHeader>
           <div className="flex items-center justify-center bg-muted rounded-lg overflow-hidden">
-            {previewDiagram?.file_url && (
+            {previewImage && (
               <img
-                src={previewDiagram.file_url}
-                alt={previewDiagram.name}
+                src={previewImage.imageUrl}
+                alt={previewImage.name}
                 className="max-h-[70vh] object-contain"
               />
+            )}
+          </div>
+          <div className="flex justify-between items-center text-sm text-muted-foreground">
+            <div className="flex items-center gap-2">
+              {previewImage?.sourceType === 'character_diagram' && (
+                <>
+                  <User className="h-4 w-4" />
+                  <span>Character Diagram</span>
+                </>
+              )}
+              {previewImage?.sourceType === 'generated' && (
+                <>
+                  <Sparkles className="h-4 w-4" />
+                  <span>Generated Image</span>
+                </>
+              )}
+            </div>
+            {previewImage && (
+              <span>{formatDate(previewImage.createdAt)}</span>
             )}
           </div>
         </DialogContent>

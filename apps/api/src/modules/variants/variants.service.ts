@@ -137,6 +137,9 @@ export class VariantsService {
           },
         },
       );
+
+      // Update job status to queued
+      await this.jobsService.updateJob(job.id, { status: 'queued' });
     }
 
     // Estimate processing time (roughly 30 seconds per variant)

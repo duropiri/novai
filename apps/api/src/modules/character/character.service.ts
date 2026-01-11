@@ -71,6 +71,9 @@ export class CharacterService {
       name,
     });
 
+    // Update job status to queued
+    await this.jobsService.updateJob(job.id, { status: 'queued' });
+
     this.logger.log(`Character diagram ${diagram.id} queued for generation`);
 
     return diagram;
@@ -117,6 +120,9 @@ export class CharacterService {
       weightsUrl: lora.weights_url,
       name,
     });
+
+    // Update job status to queued
+    await this.jobsService.updateJob(job.id, { status: 'queued' });
 
     this.logger.log(`Character diagram ${diagram.id} queued for LoRA-based generation`);
 

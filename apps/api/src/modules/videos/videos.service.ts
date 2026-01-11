@@ -43,11 +43,26 @@ export class VideosService {
     });
   }
 
-  async findAll(options?: { type?: string; collectionId?: string }): Promise<DbVideo[]> {
+  async findAll(options?: { type?: string; collectionId?: string; uncategorized?: boolean }): Promise<DbVideo[]> {
     if (!this.supabase.isInitialized()) {
       return [];
     }
     return this.supabase.listVideos(options);
+  }
+
+  async count(options?: { collectionId?: string; uncategorized?: boolean }): Promise<number> {
+    if (!this.supabase.isInitialized()) {
+      return 0;
+    }
+    return this.supabase.countVideos(options);
+  }
+
+  async moveToCollection(videoIds: string[], collectionId: string | null): Promise<void> {
+    this.checkInitialized();
+    for (const id of videoIds) {
+      await this.supabase.updateVideo(id, { collection_id: collectionId });
+    }
+    this.logger.log(`Moved ${videoIds.length} videos to collection ${collectionId || 'uncategorized'}`);
   }
 
   async findOne(id: string): Promise<DbVideo | null> {

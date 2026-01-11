@@ -41,9 +41,20 @@ export interface DbCharacterDiagram {
 export interface DbCollection {
   id: string;
   name: string;
-  type: 'video' | 'audio';
+  type: 'video' | 'audio' | 'image';
   created_at: string;
   updated_at: string;
+}
+
+export interface DbImageCollectionItem {
+  id: string;
+  collection_id: string;
+  source_type: string;
+  source_id: string | null;
+  image_url: string;
+  thumbnail_url: string | null;
+  name: string | null;
+  created_at: string;
 }
 
 export interface DbVideo {
@@ -270,6 +281,15 @@ export class SupabaseService implements OnModuleInit {
     return data || [];
   }
 
+  async deleteJob(id: string): Promise<void> {
+    const { error } = await this.client
+      .from('jobs')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw new Error(`Failed to delete job: ${error.message}`);
+  }
+
   // ============================================
   // DATABASE OPERATIONS - LORA MODELS
   // ============================================
@@ -408,7 +428,7 @@ export class SupabaseService implements OnModuleInit {
     return data;
   }
 
-  async listVideos(options?: { type?: string; collectionId?: string }): Promise<DbVideo[]> {
+  async listVideos(options?: { type?: string; collectionId?: string | null; uncategorized?: boolean }): Promise<DbVideo[]> {
     let query = this.client
       .from('videos')
       .select()
@@ -417,13 +437,32 @@ export class SupabaseService implements OnModuleInit {
     if (options?.type) {
       query = query.eq('type', options.type);
     }
-    if (options?.collectionId) {
+    if (options?.uncategorized) {
+      // Filter for videos without a collection
+      query = query.is('collection_id', null);
+    } else if (options?.collectionId) {
       query = query.eq('collection_id', options.collectionId);
     }
 
     const { data, error } = await query;
     if (error) throw new Error(`Failed to list videos: ${error.message}`);
     return data || [];
+  }
+
+  async countVideos(options?: { collectionId?: string | null; uncategorized?: boolean }): Promise<number> {
+    let query = this.client
+      .from('videos')
+      .select('*', { count: 'exact', head: true });
+
+    if (options?.uncategorized) {
+      query = query.is('collection_id', null);
+    } else if (options?.collectionId) {
+      query = query.eq('collection_id', options.collectionId);
+    }
+
+    const { count, error } = await query;
+    if (error) throw new Error(`Failed to count videos: ${error.message}`);
+    return count || 0;
   }
 
   async updateVideo(id: string, update: Partial<DbVideo>): Promise<DbVideo> {
@@ -496,7 +535,7 @@ export class SupabaseService implements OnModuleInit {
     if (error) throw new Error(`Failed to delete collection: ${error.message}`);
   }
 
-  async listCollections(type?: 'video' | 'audio'): Promise<DbCollection[]> {
+  async listCollections(type?: 'video' | 'audio' | 'image'): Promise<DbCollection[]> {
     let query = this.client
       .from('collections')
       .select()
@@ -769,5 +808,40 @@ export class SupabaseService implements OnModuleInit {
 
     if (error) throw new Error(`Failed to get recent jobs: ${error.message}`);
     return data || [];
+  }
+
+  // --- Image Collection Items ---
+
+  async createImageCollectionItem(
+    item: Omit<DbImageCollectionItem, 'id' | 'created_at'>,
+  ): Promise<DbImageCollectionItem> {
+    const { data, error } = await this.client
+      .from('image_collection_items')
+      .insert(item)
+      .select()
+      .single();
+
+    if (error) throw new Error(`Failed to create image collection item: ${error.message}`);
+    return data;
+  }
+
+  async listImageCollectionItems(collectionId: string): Promise<DbImageCollectionItem[]> {
+    const { data, error } = await this.client
+      .from('image_collection_items')
+      .select()
+      .eq('collection_id', collectionId)
+      .order('created_at', { ascending: false });
+
+    if (error) throw new Error(`Failed to list image collection items: ${error.message}`);
+    return data || [];
+  }
+
+  async deleteImageCollectionItem(id: string): Promise<void> {
+    const { error } = await this.client
+      .from('image_collection_items')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw new Error(`Failed to delete image collection item: ${error.message}`);
   }
 }

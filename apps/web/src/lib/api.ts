@@ -56,7 +56,8 @@ function getErrorMessage(statusCode: number, details: string): string {
     case 429:
       return 'Too many requests. Please wait a moment and try again.';
     case 500:
-      return 'Server error. Please try again later.';
+      // Show actual error details for 500 errors instead of generic message
+      return details || 'Server error. Please try again later.';
     case 502:
     case 503:
     case 504:
@@ -454,12 +455,21 @@ export interface CreateVideoRequest {
 }
 
 export const videosApi = {
-  list: (options?: { type?: string; collectionId?: string }) => {
+  list: (options?: { type?: string; collectionId?: string; uncategorized?: boolean }) => {
     const params = new URLSearchParams();
     if (options?.type) params.append('type', options.type);
     if (options?.collectionId) params.append('collectionId', options.collectionId);
+    if (options?.uncategorized) params.append('uncategorized', 'true');
     const query = params.toString();
     return fetchApiSilent<Video[]>(`/videos${query ? `?${query}` : ''}`, []);
+  },
+
+  count: (options?: { collectionId?: string; uncategorized?: boolean }) => {
+    const params = new URLSearchParams();
+    if (options?.collectionId) params.append('collectionId', options.collectionId);
+    if (options?.uncategorized) params.append('uncategorized', 'true');
+    const query = params.toString();
+    return fetchApiSilent<{ count: number }>(`/videos/count${query ? `?${query}` : ''}`, { count: 0 });
   },
 
   get: (id: string) => fetchApi<Video>(`/videos/${id}`),
@@ -470,10 +480,16 @@ export const videosApi = {
       body: JSON.stringify(data),
     }),
 
-  update: (id: string, data: { name?: string; collectionId?: string }) =>
+  update: (id: string, data: { name?: string; collectionId?: string | null }) =>
     fetchApi<Video>(`/videos/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(data),
+    }),
+
+  move: (videoIds: string[], collectionId: string | null) =>
+    fetchApi<{ success: boolean }>('/videos/move', {
+      method: 'POST',
+      body: JSON.stringify({ videoIds, collectionId }),
     }),
 
   delete: (id: string) =>
@@ -627,7 +643,9 @@ export interface CreateFaceSwapRequest {
   videoId: string;
   characterDiagramId: string;
   loraId?: string; // Optional - identity comes from character diagram
-  // WAN Animate Replace settings
+  // Swap method selection
+  swapMethod?: 'wan_replace' | 'face_swap';
+  // WAN Animate Replace settings (only used for wan_replace)
   resolution?: '480p' | '580p' | '720p';
   videoQuality?: 'low' | 'medium' | 'high' | 'maximum';
   useTurbo?: boolean;
@@ -644,6 +662,16 @@ export const swapApi = {
   getResult: (jobId: string) => fetchApi<Video>(`/swap/results/${jobId}`),
 
   getHistory: () => fetchApiSilent<Video[]>('/swap/history', []),
+
+  retry: (jobId: string) =>
+    fetchApi<{ success: boolean; message: string; jobId: string }>(`/swap/${jobId}/retry`, {
+      method: 'POST',
+    }),
+
+  delete: (jobId: string) =>
+    fetchApi<{ success: boolean }>(`/swap/${jobId}`, {
+      method: 'DELETE',
+    }),
 };
 
 // Image Generation API
@@ -656,19 +684,21 @@ export interface GeneratedImage {
 export interface ImageGenerationResult {
   success: boolean;
   jobId: string;
-  loraId: string;
+  loraId?: string;
+  characterDiagramId?: string;
   estimatedCostCents: number;
-  mode: 'text-to-image' | 'image-to-image';
+  mode: 'text-to-image' | 'face-swap' | 'character-diagram-swap';
 }
 
 export interface CreateImageGenerationRequest {
-  loraId: string;
-  prompt?: string; // Optional when using source image
-  sourceImageUrl?: string; // Optional source image for img2img
+  loraId?: string;
+  characterDiagramId?: string;
+  prompt?: string;
+  sourceImageUrl?: string;
   aspectRatio?: '1:1' | '16:9' | '9:16' | '4:5' | '3:4';
   numImages: number;
-  loraStrength: number;
-  imageStrength?: number; // How much to preserve source (0-1), default 0.85
+  loraStrength?: number;
+  imageStrength?: number;
 }
 
 export interface ImageGenerationJob {
@@ -693,6 +723,11 @@ export const imageGenApi = {
 
   getHistory: (limit = 20) =>
     fetchApiSilent<ImageGenerationJob[]>(`/image-generation/history?limit=${limit}`, []),
+
+  delete: (jobId: string) =>
+    fetchApi<{ success: boolean }>(`/image-generation/${jobId}`, {
+      method: 'DELETE',
+    }),
 };
 
 // Variants API
@@ -846,5 +881,66 @@ export const settingsApi = {
   testApiKey: (key: string) =>
     fetchApi<ApiKeyTestResult>(`/settings/${key}/test`, {
       method: 'POST',
+    }),
+};
+
+// ==================== Image Collections API ====================
+
+export interface ImageCollection {
+  id: string;
+  name: string;
+  type: 'smart' | 'custom';
+  count: number;
+}
+
+export interface ImageItem {
+  id: string;
+  sourceType: 'character_diagram' | 'generated' | 'custom';
+  sourceId?: string;
+  imageUrl: string;
+  thumbnailUrl?: string;
+  name: string;
+  createdAt: string;
+}
+
+export interface ImageCollectionItem {
+  id: string;
+  collection_id: string;
+  source_type: string;
+  source_id: string | null;
+  image_url: string;
+  thumbnail_url: string | null;
+  name: string | null;
+  created_at: string;
+}
+
+export const imageCollectionsApi = {
+  list: () => fetchApiSilent<ImageCollection[]>('/image-collections', []),
+
+  getAllImages: () => fetchApiSilent<ImageItem[]>('/image-collections/all-images', []),
+
+  getCollectionImages: (collectionId: string) =>
+    fetchApiSilent<ImageItem[]>(`/image-collections/${collectionId}/images`, []),
+
+  create: (name: string) =>
+    fetchApi<ImageCollection>('/image-collections', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+
+  delete: (collectionId: string) =>
+    fetchApi<{ success: boolean }>(`/image-collections/${collectionId}`, {
+      method: 'DELETE',
+    }),
+
+  addImage: (collectionId: string, data: { imageUrl: string; name?: string; sourceType?: string; sourceId?: string }) =>
+    fetchApi<ImageCollectionItem>(`/image-collections/${collectionId}/images`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  removeImage: (collectionId: string, itemId: string) =>
+    fetchApi<{ success: boolean }>(`/image-collections/${collectionId}/images/${itemId}`, {
+      method: 'DELETE',
     }),
 };

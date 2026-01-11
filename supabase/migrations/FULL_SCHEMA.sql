@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   completed_at TIMESTAMPTZ,
 
   -- Constraints
-  CONSTRAINT valid_job_type CHECK (type IN ('lora_training', 'character_diagram', 'face_swap', 'variant')),
+  CONSTRAINT valid_job_type CHECK (type IN ('lora_training', 'character_diagram', 'face_swap', 'variant', 'image_generation')),
   CONSTRAINT valid_job_status CHECK (status IN ('pending', 'queued', 'processing', 'completed', 'failed')),
   CONSTRAINT valid_progress CHECK (progress >= 0 AND progress <= 100)
 );

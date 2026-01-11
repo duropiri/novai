@@ -2,11 +2,13 @@ import {
   Controller,
   Post,
   Get,
+  Delete,
   Body,
   Param,
   Query,
   HttpException,
   HttpStatus,
+  Logger,
 } from '@nestjs/common';
 import { IsString, IsNotEmpty, IsNumber, IsOptional, Min, Max, IsIn } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -14,8 +16,12 @@ import { ImageGenerationService } from './image-generation.service';
 
 class CreateImageGenerationDto {
   @IsString()
-  @IsNotEmpty()
-  loraId!: string;
+  @IsOptional()
+  loraId?: string;
+
+  @IsString()
+  @IsOptional()
+  characterDiagramId?: string;
 
   @IsString()
   @IsOptional()
@@ -38,9 +44,10 @@ class CreateImageGenerationDto {
 
   @IsNumber()
   @Type(() => Number)
+  @IsOptional()
   @Min(0.5)
   @Max(1.0)
-  loraStrength!: number;
+  loraStrength?: number;
 
   @IsNumber()
   @Type(() => Number)
@@ -52,22 +59,39 @@ class CreateImageGenerationDto {
 
 @Controller('image-generation')
 export class ImageGenerationController {
+  private readonly logger = new Logger(ImageGenerationController.name);
+
   constructor(private readonly imageGenService: ImageGenerationService) {}
 
   @Post()
   async createGeneration(@Body() dto: CreateImageGenerationDto) {
-    if (!dto.loraId?.trim()) {
-      throw new HttpException('LoRA ID is required', HttpStatus.BAD_REQUEST);
+    this.logger.log(`Image generation request: ${JSON.stringify(dto, null, 2)}`);
+
+    const hasLora = !!dto.loraId?.trim();
+    const hasDiagram = !!dto.characterDiagramId?.trim();
+
+    // Must select either LoRA or Character Diagram, not both
+    if (hasLora && hasDiagram) {
+      throw new HttpException('Select either LoRA or Character Diagram, not both', HttpStatus.BAD_REQUEST);
+    }
+    if (!hasLora && !hasDiagram) {
+      throw new HttpException('Select a LoRA model or Character Diagram', HttpStatus.BAD_REQUEST);
     }
 
-    // Need either prompt or source image
-    if (!dto.prompt?.trim() && !dto.sourceImageUrl?.trim()) {
+    // Character Diagram mode requires source image (face swap only)
+    if (hasDiagram && !dto.sourceImageUrl?.trim()) {
+      throw new HttpException('Source image is required when using Character Diagram', HttpStatus.BAD_REQUEST);
+    }
+
+    // LoRA mode needs either prompt or source image
+    if (hasLora && !dto.prompt?.trim() && !dto.sourceImageUrl?.trim()) {
       throw new HttpException('Either prompt or source image is required', HttpStatus.BAD_REQUEST);
     }
 
     try {
       const result = await this.imageGenService.createImageGeneration({
-        loraId: dto.loraId.trim(),
+        loraId: dto.loraId?.trim(),
+        characterDiagramId: dto.characterDiagramId?.trim(),
         prompt: dto.prompt?.trim(),
         sourceImageUrl: dto.sourceImageUrl?.trim(),
         aspectRatio: dto.aspectRatio,
@@ -76,12 +100,19 @@ export class ImageGenerationController {
         imageStrength: dto.imageStrength,
       });
 
+      this.logger.log(`Image generation job created: ${result.jobId}`);
+
       return {
         success: true,
         ...result,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to create image generation';
+      const stack = error instanceof Error ? error.stack : '';
+
+      this.logger.error(`Image generation failed: ${message}`);
+      this.logger.error(`Stack trace: ${stack}`);
+      this.logger.error(`Request details: loraId=${dto.loraId}, prompt=${dto.prompt?.substring(0, 50)}, sourceImageUrl=${dto.sourceImageUrl ? 'provided' : 'none'}`);
 
       if (message.includes('not found')) {
         throw new HttpException(message, HttpStatus.NOT_FOUND);
@@ -90,6 +121,7 @@ export class ImageGenerationController {
         throw new HttpException(message, HttpStatus.BAD_REQUEST);
       }
 
+      // Return specific error message instead of generic
       throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -107,5 +139,19 @@ export class ImageGenerationController {
   async getHistory(@Query('limit') limit?: string) {
     const parsedLimit = limit ? parseInt(limit, 10) : 20;
     return this.imageGenService.listRecentGenerations(parsedLimit);
+  }
+
+  @Delete(':id')
+  async deleteGeneration(@Param('id') id: string) {
+    try {
+      await this.imageGenService.deleteGeneration(id);
+      return { success: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to delete generation';
+      if (message.includes('not found')) {
+        throw new HttpException(message, HttpStatus.NOT_FOUND);
+      }
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
   }
 }

@@ -2,6 +2,7 @@ import {
   Controller,
   Post,
   Get,
+  Delete,
   Body,
   Param,
   HttpException,
@@ -23,6 +24,11 @@ class CreateSwapRequestDto {
   @IsString()
   @IsOptional()
   loraId?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(['wan_replace', 'face_swap'])
+  swapMethod?: 'wan_replace' | 'face_swap';
 
   @IsOptional()
   @IsString()
@@ -63,6 +69,7 @@ export class SwapController {
         videoId: dto.videoId.trim(),
         characterDiagramId: dto.characterDiagramId.trim(),
         loraId: dto.loraId?.trim(),
+        swapMethod: dto.swapMethod || 'wan_replace',
         resolution: dto.resolution,
         videoQuality: dto.videoQuality,
         useTurbo: dto.useTurbo,
@@ -99,5 +106,40 @@ export class SwapController {
   @Get('history')
   async getSwapHistory() {
     return this.swapService.listSwappedVideos();
+  }
+
+  @Post(':id/retry')
+  async retrySwap(@Param('id') id: string) {
+    try {
+      const result = await this.swapService.retryJob(id);
+      return {
+        success: true,
+        message: 'Job requeued',
+        jobId: result.jobId,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to retry job';
+      if (message.includes('not found')) {
+        throw new HttpException(message, HttpStatus.NOT_FOUND);
+      }
+      if (message.includes('Cannot retry')) {
+        throw new HttpException(message, HttpStatus.BAD_REQUEST);
+      }
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  @Delete(':id')
+  async deleteSwap(@Param('id') id: string) {
+    try {
+      await this.swapService.deleteJob(id);
+      return { success: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to delete job';
+      if (message.includes('not found')) {
+        throw new HttpException(message, HttpStatus.NOT_FOUND);
+      }
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
   }
 }

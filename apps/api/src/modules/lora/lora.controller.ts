@@ -287,4 +287,31 @@ export class LoraController {
       throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
+
+  @Delete(':id/force')
+  async forceDelete(@Param('id') id: string): Promise<{ success: boolean }> {
+    try {
+      await this.loraService.forceDelete(id);
+      return { success: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to force delete LoRA';
+      if (message === 'LoRA model not found') {
+        throw new HttpException(message, HttpStatus.NOT_FOUND);
+      }
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  @Post('cleanup-stuck')
+  async cleanupStuck(
+    @Query('maxAgeMinutes') maxAgeMinutes?: string,
+  ): Promise<{ deleted: number; ids: string[] }> {
+    try {
+      const minutes = maxAgeMinutes ? parseInt(maxAgeMinutes, 10) : 60;
+      return await this.loraService.cleanupStuck(minutes);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to cleanup stuck LoRAs';
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
 }

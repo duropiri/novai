@@ -75,14 +75,119 @@ export class FalService implements OnModuleInit {
     }
   }
 
-  onModuleInit() {
+  async onModuleInit() {
     // Configure the fal.ai client with API key
     if (this.apiKey) {
       fal.config({
         credentials: this.apiKey,
       });
       this.logger.log('fal.ai client configured');
+      this.logger.log(`FAL_API_KEY present: ${this.apiKey.length > 0}, length: ${this.apiKey.length}`);
+      this.logger.log(`FAL_API_KEY prefix: ${this.apiKey.substring(0, 10)}...`);
+
+      // Check connectivity to fal.ai
+      await this.checkConnectivity();
+    } else {
+      this.logger.error('FAL_API_KEY is NOT configured!');
     }
+  }
+
+  /**
+   * Check connectivity to external services on startup
+   */
+  private async checkConnectivity(): Promise<void> {
+    const services = [
+      { name: 'fal.ai API', url: 'https://fal.run' },
+      { name: 'fal.ai Queue', url: 'https://queue.fal.run' },
+    ];
+
+    this.logger.log('Checking external service connectivity...');
+
+    for (const service of services) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+
+        const res = await fetch(service.url, {
+          method: 'HEAD',
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+
+        this.logger.log(`✅ ${service.name}: reachable (${res.status})`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`⚠️ ${service.name}: ${message}`);
+      }
+    }
+  }
+
+  /**
+   * Retry wrapper for transient network failures
+   */
+  private async withRetry<T>(
+    operation: () => Promise<T>,
+    operationName: string,
+    maxRetries = 3,
+  ): Promise<T> {
+    let lastError: Error | undefined;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await operation();
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+
+        // Check if it's a network error worth retrying
+        const isNetworkError =
+          lastError.message.includes('fetch failed') ||
+          lastError.message.includes('ECONNREFUSED') ||
+          lastError.message.includes('ETIMEDOUT') ||
+          lastError.message.includes('ENOTFOUND') ||
+          lastError.message.includes('network') ||
+          lastError.message.includes('socket');
+
+        if (!isNetworkError || attempt === maxRetries) {
+          this.logger.error(
+            `${operationName} failed after ${attempt} attempt(s): ${lastError.message}`,
+          );
+          throw lastError;
+        }
+
+        const delay = 2000 * attempt; // Exponential backoff: 2s, 4s, 6s
+        this.logger.warn(
+          `${operationName} attempt ${attempt}/${maxRetries} failed: ${lastError.message}. Retrying in ${delay}ms...`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+
+    throw lastError;
+  }
+
+  /**
+   * Enhanced error message for fetch failures
+   */
+  private formatNetworkError(error: Error, context: string): Error {
+    if (error.message.includes('fetch failed')) {
+      return new Error(
+        `Network error during ${context}: Cannot reach external API. ` +
+          `Check your internet connection and try again. Original: ${error.message}`,
+      );
+    }
+    if (error.message.includes('ECONNREFUSED')) {
+      return new Error(
+        `Connection refused during ${context}: The external service may be down. ` +
+          `Original: ${error.message}`,
+      );
+    }
+    if (error.message.includes('ETIMEDOUT')) {
+      return new Error(
+        `Connection timeout during ${context}: The request took too long. ` +
+          `Original: ${error.message}`,
+      );
+    }
+    return error;
   }
 
   private async request<T>(
@@ -118,16 +223,32 @@ export class FalService implements OnModuleInit {
    * Returns a request_id for polling
    */
   async submitLoraTraining(input: FalLoraTrainingInput): Promise<{ request_id: string }> {
-    this.logger.log('Submitting LoRA training job to fal.ai');
+    this.logger.log('=== LORA TRAINING SUBMISSION START ===');
+    this.logger.log(`Input: ${JSON.stringify(input, null, 2)}`);
+    this.logger.log(`FAL API Key configured: ${!!this.apiKey}, length: ${this.apiKey?.length || 0}`);
 
-    const response = await this.request<{ request_id: string }>(
-      'fal-ai/flux-lora-fast-training',
-      'POST',
-      input,
-    );
+    try {
+      const response = await this.withRetry(
+        () =>
+          this.request<{ request_id: string }>(
+            'fal-ai/flux-lora-fast-training',
+            'POST',
+            input,
+          ),
+        'LoRA training submission',
+        3,
+      );
 
-    this.logger.log(`LoRA training submitted with request_id: ${response.request_id}`);
-    return response;
+      this.logger.log(`=== LORA TRAINING SUBMISSION SUCCESSFUL ===`);
+      this.logger.log(`Request ID from fal.ai: ${response.request_id}`);
+      return response;
+    } catch (error) {
+      const originalError = error instanceof Error ? error : new Error(String(error));
+      const formattedError = this.formatNetworkError(originalError, 'LoRA training submission');
+      this.logger.error(`=== LORA TRAINING SUBMISSION FAILED ===`);
+      this.logger.error(`Error: ${formattedError.message}`);
+      throw formattedError;
+    }
   }
 
   /**
@@ -166,26 +287,71 @@ export class FalService implements OnModuleInit {
   ): Promise<FalLoraTrainingOutput> {
     const { intervalMs = 15000, maxAttempts = 120, onProgress } = options;
 
+    this.logger.log(`=== LORA TRAINING POLLING START ===`);
+    this.logger.log(`Request ID: ${requestId}`);
+    this.logger.log(`Max attempts: ${maxAttempts}, Interval: ${intervalMs}ms`);
+
+    const startTime = Date.now();
+
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const status = await this.getLoraTrainingStatus(requestId);
+      try {
+        const status = await this.getLoraTrainingStatus(requestId);
+        const elapsed = Math.round((Date.now() - startTime) / 1000);
 
-      if (onProgress) {
-        onProgress(status);
+        this.logger.log(
+          `[Poll ${attempt + 1}/${maxAttempts}] Status: ${status.status}, RequestID: ${requestId}, Elapsed: ${elapsed}s`,
+        );
+
+        // Log any messages from fal.ai
+        if (status.logs?.length) {
+          for (const log of status.logs.slice(-3)) {
+            // Log last 3 messages
+            this.logger.log(`  [fal.ai] ${log.message}`);
+          }
+        }
+
+        if (onProgress) {
+          onProgress(status);
+        }
+
+        if (status.status === 'COMPLETED') {
+          this.logger.log(`=== LORA TRAINING COMPLETED ===`);
+          this.logger.log(`Request ID: ${requestId}`);
+          this.logger.log(`Total time: ${elapsed}s`);
+
+          const result = await this.getLoraTrainingResult(requestId);
+          this.logger.log(`Result: ${JSON.stringify(result, null, 2)}`);
+          return result;
+        }
+
+        if (status.status === 'FAILED') {
+          this.logger.error(`=== LORA TRAINING FAILED ON FAL.AI ===`);
+          this.logger.error(`Status: ${JSON.stringify(status, null, 2)}`);
+          throw new Error('LoRA training failed on fal.ai');
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      } catch (pollError) {
+        // Handle network errors during polling (retry the poll, not the whole job)
+        const errorMsg = pollError instanceof Error ? pollError.message : String(pollError);
+        if (
+          errorMsg.includes('fetch failed') ||
+          errorMsg.includes('ECONNREFUSED') ||
+          errorMsg.includes('ETIMEDOUT')
+        ) {
+          this.logger.warn(`Poll ${attempt + 1} network error: ${errorMsg}. Continuing...`);
+          await new Promise((resolve) => setTimeout(resolve, intervalMs));
+          continue;
+        }
+        throw pollError;
       }
-
-      if (status.status === 'COMPLETED') {
-        return this.getLoraTrainingResult(requestId);
-      }
-
-      if (status.status === 'FAILED') {
-        throw new Error('LoRA training failed');
-      }
-
-      this.logger.debug(`LoRA training status: ${status.status} (attempt ${attempt + 1}/${maxAttempts})`);
-      await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
 
-    throw new Error(`LoRA training timed out after ${maxAttempts} attempts`);
+    const totalTime = Math.round((Date.now() - startTime) / 1000);
+    this.logger.error(`=== LORA TRAINING TIMEOUT ===`);
+    this.logger.error(`Request ID: ${requestId}`);
+    this.logger.error(`Timed out after ${totalTime}s (${maxAttempts} attempts)`);
+    throw new Error(`LoRA training timed out after ${maxAttempts} attempts (${totalTime}s)`);
   }
 
   // ============================================
@@ -424,13 +590,16 @@ export class FalService implements OnModuleInit {
     video_quality?: 'low' | 'medium' | 'high' | 'maximum';
     video_write_mode?: 'fast' | 'balanced' | 'small';
     use_turbo?: boolean;
-    onProgress?: (status: { status: string; logs?: Array<{ message: string }> }) => void;
+    onProgress?: (status: { status: string; request_id?: string; logs?: Array<{ message: string }> }) => void;
   }): Promise<{ video: { url: string }; seed: number; prompt?: string }> {
-    this.logger.log('Running WAN Animate Replace via fal.ai client');
-    this.logger.log(`Input: video_url=${input.video_url.substring(0, 50)}..., image_url=${input.image_url.substring(0, 50)}...`);
+    const endpoint = 'fal-ai/wan/v2.2-14b/animate/replace';
+    this.logger.log('=== WAN Animate Replace START ===');
+    this.logger.log(`Endpoint: ${endpoint}`);
+    this.logger.log(`Video URL: ${input.video_url}`);
+    this.logger.log(`Image URL: ${input.image_url}`);
+    this.logger.log(`FAL API Key configured: ${!!this.apiKey}, length: ${this.apiKey?.length || 0}`);
 
     try {
-      // Use type assertion since SDK types may not include all valid parameters
       const apiInput = {
         video_url: input.video_url,
         image_url: input.image_url,
@@ -442,38 +611,117 @@ export class FalService implements OnModuleInit {
         enable_safety_checker: false,
       };
 
-      const result = await fal.subscribe('fal-ai/wan/v2.2-14b/animate/replace', {
-        input: apiInput as Parameters<typeof fal.subscribe<'fal-ai/wan/v2.2-14b/animate/replace'>>[1]['input'],
-        logs: true,
-        onQueueUpdate: (update) => {
-          this.logger.log(`WAN Animate Replace queue status: ${update.status}`);
-          if (input.onProgress) {
-            input.onProgress({
-              status: update.status,
-              logs: 'logs' in update ? update.logs : undefined,
-            });
-          }
-        },
-      });
+      this.logger.log(`API Input: ${JSON.stringify(apiInput, null, 2)}`);
 
-      this.logger.log('WAN Animate Replace completed');
+      // Step 1: Submit to queue with retry for network failures
+      this.logger.log('Step 1: Submitting to fal.ai queue...');
+      const submitResult = await this.withRetry(
+        () => fal.queue.submit(endpoint, { input: apiInput }),
+        'fal.ai queue submission',
+        3,
+      );
 
-      // Type assertion for the result
-      const typedResult = result.data as {
-        video: { url: string };
-        seed: number;
-        prompt?: string;
-      };
+      const requestId = submitResult.request_id;
+      this.logger.log(`=== SUBMISSION SUCCESSFUL ===`);
+      this.logger.log(`Request ID from fal.ai: ${requestId}`);
+      this.logger.log(`Full submit response: ${JSON.stringify(submitResult, null, 2)}`);
 
-      if (!typedResult?.video?.url) {
-        throw new Error('WAN Animate Replace returned no video URL');
+      if (!requestId) {
+        throw new Error('fal.ai did not return a request_id - submission may have failed silently');
       }
 
-      return typedResult;
+      // Notify progress callback with request_id
+      if (input.onProgress) {
+        input.onProgress({ status: 'SUBMITTED', request_id: requestId });
+      }
+
+      // Step 2: Poll for status
+      this.logger.log('Step 2: Polling for completion...');
+      let pollCount = 0;
+      const maxPolls = 360; // 30 minutes at 5 second intervals
+      const pollInterval = 5000;
+
+      while (pollCount < maxPolls) {
+        pollCount++;
+
+        const status = await fal.queue.status(endpoint, {
+          requestId,
+          logs: true,
+        });
+
+        // Type assertion for status with optional logs
+        const statusWithLogs = status as { status: string; logs?: Array<{ message: string }> };
+
+        this.logger.log(`[Poll ${pollCount}] Status: ${statusWithLogs.status}, RequestID: ${requestId}`);
+
+        // Log any new logs
+        if (statusWithLogs.logs?.length) {
+          for (const log of statusWithLogs.logs) {
+            this.logger.log(`  [fal.ai] ${log.message}`);
+          }
+        }
+
+        if (input.onProgress) {
+          input.onProgress({
+            status: statusWithLogs.status,
+            request_id: requestId,
+            logs: statusWithLogs.logs,
+          });
+        }
+
+        if (statusWithLogs.status === 'COMPLETED') {
+          // Get the result
+          this.logger.log('Step 3: Fetching result...');
+          const result = await fal.queue.result(endpoint, { requestId });
+
+          this.logger.log('=== WAN Animate Replace COMPLETED ===');
+          this.logger.log(`Request ID: ${requestId}`);
+          this.logger.log(`Total polls: ${pollCount}`);
+          this.logger.log(`Result: ${JSON.stringify(result, null, 2)}`);
+
+          const typedResult = result.data as {
+            video: { url: string };
+            seed: number;
+            prompt?: string;
+          };
+
+          if (!typedResult?.video?.url) {
+            this.logger.error(`No video URL in result`);
+            throw new Error('WAN Animate Replace returned no video URL');
+          }
+
+          return typedResult;
+        }
+
+        if (statusWithLogs.status === 'FAILED') {
+          this.logger.error(`Job failed on fal.ai: ${JSON.stringify(statusWithLogs, null, 2)}`);
+          throw new Error('WAN Animate Replace failed on fal.ai');
+        }
+
+        // Wait before next poll
+        await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      }
+
+      throw new Error(`WAN Animate Replace timed out after ${maxPolls} polls`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      this.logger.error(`WAN Animate Replace failed: ${message}`);
-      throw error;
+      const originalError = error instanceof Error ? error : new Error(String(error));
+      const formattedError = this.formatNetworkError(originalError, 'WAN Animate Replace');
+
+      this.logger.error(`=== WAN Animate Replace FAILED ===`);
+      this.logger.error(`Error: ${formattedError.message}`);
+      this.logger.error(`Stack: ${originalError.stack || ''}`);
+
+      if (error && typeof error === 'object') {
+        const errorObj = error as Record<string, unknown>;
+        if (errorObj.body) {
+          this.logger.error(`Error body: ${JSON.stringify(errorObj.body, null, 2)}`);
+        }
+        if (errorObj.status) {
+          this.logger.error(`Error status: ${errorObj.status}`);
+        }
+      }
+
+      throw formattedError;
     }
   }
 
@@ -724,6 +972,93 @@ export class FalService implements OnModuleInit {
   }
 
   // ============================================
+  // FLUX PULID - Identity-Preserving Generation
+  // ============================================
+
+  /**
+   * Generate an image using Flux PuLID for natural identity preservation.
+   * This produces much more natural results than basic face swap by generating
+   * a new image with the identity rather than pasting faces.
+   *
+   * @param input.prompt - Description of the scene/pose to generate
+   * @param input.reference_image_url - Face/identity reference (character diagram)
+   * @param input.image_size - Output image dimensions
+   * @param input.id_weight - How strongly to preserve identity (0-1, default 1)
+   * @param input.start_step - When to apply identity (0-4, lower = more similar, higher = more editable)
+   * @param input.num_inference_steps - Quality vs speed (default 20)
+   */
+  async runFluxPulid(input: {
+    prompt: string;
+    reference_image_url: string;
+    image_size?: 'square_hd' | 'square' | 'portrait_4_3' | 'portrait_16_9' | 'landscape_4_3' | 'landscape_16_9';
+    id_weight?: number;
+    start_step?: number;
+    num_inference_steps?: number;
+    seed?: number;
+    negative_prompt?: string;
+  }): Promise<{ images: Array<{ url: string; width: number; height: number }> }> {
+    this.logger.log('Running Flux PuLID generation', {
+      prompt: input.prompt.substring(0, 50),
+      hasReference: !!input.reference_image_url,
+      imageSize: input.image_size,
+      idWeight: input.id_weight,
+    });
+
+    try {
+      const result = await this.withRetry(
+        () =>
+          fal.subscribe('fal-ai/flux-pulid', {
+            input: {
+              prompt: input.prompt,
+              reference_image_url: input.reference_image_url,
+              image_size: input.image_size || 'square_hd',
+              id_weight: input.id_weight ?? 1.0,
+              start_step: input.start_step ?? 0, // 0 for realistic, 4 for stylized
+              num_inference_steps: input.num_inference_steps ?? 20,
+              seed: input.seed,
+              negative_prompt: input.negative_prompt || 'blurry, low quality, distorted face, deformed',
+              guidance_scale: 4,
+              true_cfg: 1,
+              max_sequence_length: '128' as const,
+            },
+            logs: true,
+          }),
+        'fal.ai flux-pulid',
+        3,
+      );
+
+      const typedResult = result.data as {
+        images: Array<{
+          url: string;
+          width: number;
+          height: number;
+          content_type: string;
+        }>;
+        seed: number;
+      };
+
+      if (!typedResult?.images || typedResult.images.length === 0) {
+        throw new Error('Flux PuLID returned no images');
+      }
+
+      this.logger.log(`Flux PuLID completed: ${typedResult.images.length} image(s) generated`);
+
+      return {
+        images: typedResult.images.map((img) => ({
+          url: img.url,
+          width: img.width,
+          height: img.height,
+        })),
+      };
+    } catch (error) {
+      const originalError = error instanceof Error ? error : new Error(String(error));
+      const formattedError = this.formatNetworkError(originalError, 'Flux PuLID');
+      this.logger.error(`Flux PuLID failed: ${formattedError.message}`);
+      throw formattedError;
+    }
+  }
+
+  // ============================================
   // IMAGE FACE SWAP (for frame-by-frame processing)
   // ============================================
 
@@ -737,13 +1072,19 @@ export class FalService implements OnModuleInit {
     swap_image_url: string; // Face source (character diagram)
   }): Promise<{ image: { url: string; width: number; height: number } }> {
     try {
-      const result = await fal.subscribe('fal-ai/face-swap', {
-        input: {
-          base_image_url: input.base_image_url,
-          swap_image_url: input.swap_image_url,
-        },
-        logs: true,
-      });
+      // Use retry for network failures (important for frame-by-frame processing)
+      const result = await this.withRetry(
+        () =>
+          fal.subscribe('fal-ai/face-swap', {
+            input: {
+              base_image_url: input.base_image_url,
+              swap_image_url: input.swap_image_url,
+            },
+            logs: true,
+          }),
+        'fal.ai face-swap',
+        2, // Fewer retries per frame to avoid long delays
+      );
 
       const typedResult = result.data as {
         image: { url: string; width: number; height: number; content_type: string };
@@ -761,9 +1102,10 @@ export class FalService implements OnModuleInit {
         },
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      this.logger.error(`Face swap failed: ${message}`);
-      throw error;
+      const originalError = error instanceof Error ? error : new Error(String(error));
+      const formattedError = this.formatNetworkError(originalError, 'face swap');
+      this.logger.error(`Face swap failed: ${formattedError.message}`);
+      throw formattedError;
     }
   }
 
