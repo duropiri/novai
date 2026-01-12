@@ -94,57 +94,42 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
 
       let result: { images: Array<{ url: string; width: number; height: number }> };
 
-      if (mode === 'character-diagram-swap' && characterDiagramUrl) {
-        // Character Diagram swap mode using Flux PuLID for natural results
-        this.logger.log(`Character Diagram swap mode: using Flux PuLID for identity-preserving generation`);
+      if (mode === 'character-diagram-swap' && characterDiagramUrl && sourceImageUrl) {
+        // Character Diagram face swap mode: swap face from diagram into source image
+        this.logger.log(`Character Diagram face swap mode: using fal-ai/face-swap`);
+        this.logger.log(`Base image (scene): ${sourceImageUrl}`);
+        this.logger.log(`Swap image (face): ${characterDiagramUrl}`);
 
         await this.supabase.updateJob(jobId, { progress: 20 });
-
-        // Use provided prompt or create a default one
-        const generationPrompt = prompt || 'portrait photo, high quality, photorealistic, natural lighting';
-
-        // Map aspect ratio to PuLID image size
-        const aspectRatioToPulidSize: Record<string, 'square_hd' | 'square' | 'portrait_4_3' | 'portrait_16_9' | 'landscape_4_3' | 'landscape_16_9'> = {
-          '1:1': 'square_hd',
-          '16:9': 'landscape_16_9',
-          '9:16': 'portrait_16_9',
-          '4:5': 'portrait_4_3',
-          '3:4': 'portrait_4_3',
-        };
-        const imageSize = (aspectRatio && aspectRatioToPulidSize[aspectRatio]) || 'square_hd';
 
         const generatedImages: Array<{ url: string; width: number; height: number }> = [];
 
         for (let i = 0; i < numImages; i++) {
-          this.logger.log(`Flux PuLID generation ${i + 1}/${numImages} using Character Diagram`);
+          this.logger.log(`Face swap ${i + 1}/${numImages} using Character Diagram`);
 
-          const pulidResult = await this.falService.runFluxPulid({
-            prompt: generationPrompt,
-            reference_image_url: characterDiagramUrl,
-            image_size: imageSize,
-            id_weight: 1.0, // Strong identity preservation
-            start_step: 0, // Start early for realistic look
-            num_inference_steps: 20,
+          const swapResult = await this.falService.runFaceSwap({
+            base_image_url: sourceImageUrl,    // The image with the scene/pose to keep
+            swap_image_url: characterDiagramUrl, // The face to swap in
           });
 
-          if (pulidResult.images && pulidResult.images.length > 0) {
+          if (swapResult.image) {
             generatedImages.push({
-              url: pulidResult.images[0].url,
-              width: pulidResult.images[0].width,
-              height: pulidResult.images[0].height,
+              url: swapResult.image.url,
+              width: swapResult.image.width,
+              height: swapResult.image.height,
             });
           }
 
           await this.supabase.updateJob(jobId, {
             progress: 20 + Math.floor((i + 1) / numImages * 70),
-            external_status: 'GENERATING_WITH_IDENTITY',
+            external_status: 'SWAPPING_FACE',
           });
         }
 
         result = { images: generatedImages };
       } else if (mode === 'face-swap' && sourceImageUrl && loraWeightsUrl && loraTriggerWord) {
-        // LoRA Face swap mode: generate reference face from LoRA, then use Flux PuLID
-        this.logger.log(`LoRA Face swap mode: generating reference face from LoRA, then using Flux PuLID`);
+        // LoRA Face swap mode: generate reference face from LoRA, then swap into source image
+        this.logger.log(`LoRA Face swap mode: generating reference face, then using fal-ai/face-swap`);
 
         // Step 1: Generate a reference face portrait from the LoRA
         const facePrompt = `${loraTriggerWord} portrait photo, face closeup, looking at camera, neutral expression, plain background, high quality`;
@@ -176,45 +161,30 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
 
         await this.supabase.updateJob(jobId, { progress: 50 });
 
-        // Step 2: Use Flux PuLID with the generated face as identity reference
-        // Use provided prompt or create a default one describing the scene
-        const generationPrompt = prompt || 'portrait photo, high quality, photorealistic, natural lighting';
-
-        // Map aspect ratio to PuLID image size
-        const aspectRatioToPulidSize: Record<string, 'square_hd' | 'square' | 'portrait_4_3' | 'portrait_16_9' | 'landscape_4_3' | 'landscape_16_9'> = {
-          '1:1': 'square_hd',
-          '16:9': 'landscape_16_9',
-          '9:16': 'portrait_16_9',
-          '4:5': 'portrait_4_3',
-          '3:4': 'portrait_4_3',
-        };
-        const imageSize = (aspectRatio && aspectRatioToPulidSize[aspectRatio]) || 'square_hd';
+        // Step 2: Use fal-ai/face-swap to swap the generated face into the source image
+        this.logger.log(`Swapping face into source image: ${sourceImageUrl}`);
 
         const generatedImages: Array<{ url: string; width: number; height: number }> = [];
 
         for (let i = 0; i < numImages; i++) {
-          this.logger.log(`Flux PuLID generation ${i + 1}/${numImages}`);
+          this.logger.log(`Face swap ${i + 1}/${numImages}`);
 
-          const pulidResult = await this.falService.runFluxPulid({
-            prompt: generationPrompt,
-            reference_image_url: referenceFaceUrl,
-            image_size: imageSize,
-            id_weight: 1.0,
-            start_step: 0,
-            num_inference_steps: 20,
+          const swapResult = await this.falService.runFaceSwap({
+            base_image_url: sourceImageUrl,    // The image with the scene/pose to keep
+            swap_image_url: referenceFaceUrl,  // The LoRA-generated face to swap in
           });
 
-          if (pulidResult.images && pulidResult.images.length > 0) {
+          if (swapResult.image) {
             generatedImages.push({
-              url: pulidResult.images[0].url,
-              width: pulidResult.images[0].width,
-              height: pulidResult.images[0].height,
+              url: swapResult.image.url,
+              width: swapResult.image.width,
+              height: swapResult.image.height,
             });
           }
 
           await this.supabase.updateJob(jobId, {
             progress: 50 + Math.floor((i + 1) / numImages * 40),
-            external_status: 'GENERATING_WITH_IDENTITY',
+            external_status: 'SWAPPING_FACE',
           });
         }
 

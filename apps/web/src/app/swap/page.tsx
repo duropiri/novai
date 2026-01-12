@@ -57,7 +57,7 @@ export default function AISwapperPage() {
   const [selectedLora, setSelectedLora] = useState<LoraModel | null>(null);
 
   // Swap method selection
-  const [swapMethod, setSwapMethod] = useState<'wan_replace' | 'face_swap'>('wan_replace');
+  const [swapMethod, setSwapMethod] = useState<'kling' | 'wan_replace'>('kling');
 
   // WAN settings (only used for wan_replace method)
   const [resolution, setResolution] = useState<'480p' | '580p' | '720p'>('720p');
@@ -147,23 +147,21 @@ export default function AISwapperPage() {
 
   // Calculate estimated cost based on swap method
   const durationSeconds = selectedVideo?.duration_seconds || 0;
-  const fps = 30; // Assume 30fps for face swap frame count
-  const frameCount = Math.ceil(durationSeconds * fps);
 
-  // WAN: per-second pricing, Face Swap: per-frame pricing (~$0.005/frame)
+  // WAN: per-second pricing, Kling: flat rate per video (~$0.10 for face swap + $0.30 for motion)
   const costPerSecond = WAN_COST_PER_SECOND[resolution] || 8;
-  const faceSwapCostPerFrame = 0.5; // $0.005/frame = 0.5 cents
+  const klingBaseCost = 40; // $0.40 flat rate for Kling method (face swap + motion)
 
   const estimatedCost = durationSeconds > 0
     ? swapMethod === 'wan_replace'
       ? ((durationSeconds * costPerSecond) / 100).toFixed(2)
-      : ((frameCount * faceSwapCostPerFrame) / 100).toFixed(2)
+      : (klingBaseCost / 100).toFixed(2)
     : '0.00';
 
   const costDescription = durationSeconds > 0
     ? swapMethod === 'wan_replace'
       ? `$${(costPerSecond / 100).toFixed(2)}/sec at ${resolution}`
-      : `~${frameCount} frames at $0.005/frame`
+      : 'Flat rate: face swap + motion generation'
     : '';
 
   const handleGenerate = async () => {
@@ -520,9 +518,35 @@ export default function AISwapperPage() {
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-lg">4. Swap Method</CardTitle>
-              <CardDescription>Choose how the face swap is performed</CardDescription>
+              <CardDescription>Choose what to replace in the video</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
+              {/* Face Swap Only - keeps original outfit */}
+              <div
+                onClick={() => setSwapMethod('kling')}
+                className={`p-3 rounded-lg border-2 cursor-pointer transition-all ${
+                  swapMethod === 'kling'
+                    ? 'border-primary bg-primary/5'
+                    : 'border-muted hover:border-muted-foreground/50'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                    swapMethod === 'kling' ? 'border-primary' : 'border-muted-foreground'
+                  }`}>
+                    {swapMethod === 'kling' && (
+                      <div className="w-2 h-2 rounded-full bg-primary" />
+                    )}
+                  </div>
+                  <span className="font-medium">Face Swap Only</span>
+                  <Badge variant="outline" className="ml-auto">Keeps Original Outfit</Badge>
+                </div>
+                <p className="text-sm text-muted-foreground mt-1 ml-6">
+                  Only swaps the face onto the original video. Keeps the outfit, background, and everything else from the source video.
+                </p>
+              </div>
+
+              {/* Full Character Replace - changes outfit too */}
               <div
                 onClick={() => setSwapMethod('wan_replace')}
                 className={`p-3 rounded-lg border-2 cursor-pointer transition-all ${
@@ -539,36 +563,21 @@ export default function AISwapperPage() {
                       <div className="w-2 h-2 rounded-full bg-primary" />
                     )}
                   </div>
-                  <span className="font-medium">WAN Animate Replace</span>
-                  <Badge variant="secondary" className="ml-auto">Faster</Badge>
+                  <span className="font-medium">Full Character Replace</span>
+                  <Badge variant="secondary" className="ml-auto">Changes Outfit</Badge>
                 </div>
                 <p className="text-sm text-muted-foreground mt-1 ml-6">
-                  AI regenerates the video with your character. May alter motion slightly.
+                  Replaces the entire person with your character diagram&apos;s appearance (face AND outfit). Use when you want the character&apos;s outfit in the video.
                 </p>
               </div>
 
-              <div
-                onClick={() => setSwapMethod('face_swap')}
-                className={`p-3 rounded-lg border-2 cursor-pointer transition-all ${
-                  swapMethod === 'face_swap'
-                    ? 'border-primary bg-primary/5'
-                    : 'border-muted hover:border-muted-foreground/50'
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
-                    swapMethod === 'face_swap' ? 'border-primary' : 'border-muted-foreground'
-                  }`}>
-                    {swapMethod === 'face_swap' && (
-                      <div className="w-2 h-2 rounded-full bg-primary" />
-                    )}
-                  </div>
-                  <span className="font-medium">Frame-by-Frame Face Swap</span>
-                  <Badge variant="outline" className="ml-auto">Precise</Badge>
-                </div>
-                <p className="text-sm text-muted-foreground mt-1 ml-6">
-                  Swaps face in each frame. Preserves original motion exactly.
-                </p>
+              {/* Quick comparison hint */}
+              <div className="mt-2 p-3 bg-muted/50 rounded-lg text-sm">
+                <p className="font-medium mb-2">Which should I use?</p>
+                <ul className="space-y-1 text-muted-foreground">
+                  <li>• Want to keep the original video&apos;s outfit? → <strong>Face Swap Only</strong></li>
+                  <li>• Want the character&apos;s outfit from the diagram? → <strong>Full Character Replace</strong></li>
+                </ul>
               </div>
             </CardContent>
           </Card>

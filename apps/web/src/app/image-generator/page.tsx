@@ -192,25 +192,16 @@ export default function ImageGeneratorPage() {
       return;
     }
 
-    // Character Diagram mode requires prompt (uses Flux PuLID for identity-preserving generation)
-    if (identitySource === 'character-diagram' && !prompt.trim()) {
+    // Text-to-image mode requires prompt (when no source image)
+    if (!sourceImage && !prompt.trim()) {
       toast({
         title: 'Missing Prompt',
-        description: 'Please describe what you want to generate (e.g., "portrait in a coffee shop, smiling")',
+        description: 'Please enter a prompt to describe what you want to generate',
         variant: 'destructive',
       });
       return;
     }
-
-    // LoRA mode needs either prompt or source image
-    if (identitySource === 'lora' && !prompt.trim() && !sourceImage) {
-      toast({
-        title: 'Missing Input',
-        description: 'Please enter a prompt or upload a source image',
-        variant: 'destructive',
-      });
-      return;
-    }
+    // Face swap mode (source image provided) - prompt is optional, will be auto-generated on backend
 
     setIsGenerating(true);
 
@@ -313,12 +304,13 @@ export default function ImageGeneratorPage() {
     }
   };
 
-  // Can generate based on identity source:
-  // - LoRA mode: need LoRA AND (prompt OR source image)
-  // - Character Diagram mode: need diagram AND source image
+  // Can generate based on identity source and mode:
+  // - Face swap mode (source image provided): need identity only, prompt is auto-generated
+  // - Text-to-image mode (no source image): need identity AND prompt
+  const isFaceSwapMode = !!sourceImage;
   const canGenerate =
-    (identitySource === 'lora' && selectedLora && (prompt.trim() || sourceImage)) ||
-    (identitySource === 'character-diagram' && selectedDiagram && sourceImage);
+    (identitySource === 'lora' && selectedLora && (isFaceSwapMode || prompt.trim())) ||
+    (identitySource === 'character-diagram' && selectedDiagram && (isFaceSwapMode || prompt.trim()));
   const canGenerateNow = canGenerate && !isGenerating;
 
   return (
@@ -482,20 +474,27 @@ export default function ImageGeneratorPage() {
             </CardContent>
           </Card>
 
-          {/* 2. Source Image (Optional - for LoRA face swap mode only) */}
-          {identitySource === 'lora' && (
+          {/* 2. Source Image - Required for Character Diagram, Optional for LoRA */}
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-lg">
                 <Upload className="w-5 h-5" />
                 2. Source Image
-                <Badge variant="outline" className="ml-1">Optional</Badge>
+                {identitySource === 'character-diagram' ? (
+                  <Badge variant="secondary" className="ml-1">Required</Badge>
+                ) : (
+                  <Badge variant="outline" className="ml-1">Optional</Badge>
+                )}
                 {sourceImage && <Badge className="ml-auto bg-blue-500/10 text-blue-600 border-blue-500/20">Face Swap Mode</Badge>}
               </CardTitle>
               <CardDescription>
-                {sourceImage
-                  ? 'The face in this image will be swapped with your LoRA identity'
-                  : 'Upload an image to swap faces, or skip to generate from text prompt'}
+                {identitySource === 'character-diagram'
+                  ? sourceImage
+                    ? 'The face from your Character Diagram will be swapped into this image'
+                    : 'Upload the image you want to swap the face into'
+                  : sourceImage
+                    ? 'The face in this image will be swapped with your LoRA identity'
+                    : 'Upload an image to swap faces, or skip to generate from text prompt'}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -523,14 +522,24 @@ export default function ImageGeneratorPage() {
                     <X className="w-4 h-4" />
                   </Button>
                   <p className="text-xs text-muted-foreground mt-2 text-center">
-                    The face in this image will be replaced with your LoRA identity
+                    {identitySource === 'character-diagram'
+                      ? 'The face from your Character Diagram will be swapped into this image'
+                      : 'The face in this image will be replaced with your LoRA identity'}
                   </p>
                 </div>
               ) : (
                 <button
                   onClick={() => fileInputRef.current?.click()}
                   disabled={isUploadingImage}
-                  className="w-full border-2 border-dashed rounded-lg p-6 text-center hover:border-primary/50 transition-colors"
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    const file = e.dataTransfer.files?.[0];
+                    if (file && file.type.startsWith('image/')) {
+                      setSourceImage({ url: URL.createObjectURL(file), file });
+                    }
+                  }}
+                  className="w-full border-2 border-dashed rounded-lg p-8 text-center hover:border-primary/50 transition-colors"
                 >
                   {isUploadingImage ? (
                     <Loader2 className="w-8 h-8 mx-auto mb-2 animate-spin text-muted-foreground" />
@@ -538,7 +547,7 @@ export default function ImageGeneratorPage() {
                     <Upload className="w-8 h-8 mx-auto mb-2 text-muted-foreground" />
                   )}
                   <p className="text-sm text-muted-foreground">
-                    Click to upload a source image
+                    Click to upload or drag and drop
                   </p>
                   <p className="text-xs text-muted-foreground mt-1">
                     PNG, JPG up to 10MB
@@ -547,57 +556,68 @@ export default function ImageGeneratorPage() {
               )}
             </CardContent>
           </Card>
-          )}
 
-          {/* Prompt - Required for Character Diagram, step 2 or 3 depending on mode */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="flex items-center gap-2 text-lg">
-                <ImageIcon className="w-5 h-5" />
-                {identitySource === 'character-diagram' ? '2' : '3'}. Prompt
-                {identitySource === 'character-diagram' || (identitySource === 'lora' && !sourceImage) ? (
+          {/* Prompt - Only show when NOT in face swap mode */}
+          {!sourceImage ? (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="flex items-center gap-2 text-lg">
+                  <ImageIcon className="w-5 h-5" />
+                  3. Prompt
                   <Badge variant="secondary" className="ml-1">Required</Badge>
-                ) : (
-                  <Badge variant="outline" className="ml-1">Optional</Badge>
-                )}
-              </CardTitle>
-              <CardDescription>
-                {identitySource === 'character-diagram'
-                  ? 'Describe the scene, pose, and style you want (e.g., "portrait in a coffee shop, smiling, natural lighting")'
-                  : sourceImage
-                    ? 'Optional: Add a prompt to guide the transformation'
-                    : 'Describe the image you want to generate'}
-                {identitySource === 'lora' && selectedLora && (
-                  <span className="block mt-1 text-xs">
-                    Trigger word <code className="bg-muted px-1 rounded">{selectedLora.trigger_word}</code> will be auto-added
-                  </span>
-                )}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Textarea
-                placeholder={identitySource === 'character-diagram'
-                  ? "professional portrait photo, natural lighting, looking at camera..."
-                  : sourceImage
-                    ? "Optional: describe any changes you want..."
-                    : "standing on a beach at sunset, professional photo, high quality..."}
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                rows={3}
-                className="resize-none"
-              />
-            </CardContent>
-          </Card>
+                </CardTitle>
+                <CardDescription>
+                  Describe the scene, pose, and style you want to generate
+                  {identitySource === 'lora' && selectedLora && (
+                    <span className="block mt-1 text-xs">
+                      Trigger word <code className="bg-muted px-1 rounded">{selectedLora.trigger_word}</code> will be auto-added
+                    </span>
+                  )}
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Textarea
+                  placeholder="professional portrait photo, natural lighting, looking at camera..."
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  rows={3}
+                  className="resize-none"
+                />
+              </CardContent>
+            </Card>
+          ) : (
+            /* Face Swap Mode Info Box */
+            <Card className="border-blue-200 bg-blue-50/50">
+              <CardContent className="pt-6">
+                <div className="flex items-start gap-3">
+                  <div className="p-2 rounded-full bg-blue-100">
+                    <User className="w-5 h-5 text-blue-600" />
+                  </div>
+                  <div>
+                    <h3 className="font-medium text-blue-900">Face Swap Mode</h3>
+                    <p className="text-sm text-blue-700 mt-1">
+                      {identitySource === 'character-diagram'
+                        ? 'The face from your Character Diagram will be used to generate images with the same identity, pose, and style as your source image.'
+                        : 'A reference face will be generated from your LoRA, then used to create images matching the pose and style of your source image.'}
+                    </p>
+                    <p className="text-xs text-blue-600 mt-2">
+                      No prompt needed - the system will automatically optimize for best results.
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
 
           {/* Settings */}
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-lg">{identitySource === 'character-diagram' ? '3' : '4'}. Settings</CardTitle>
+              <CardTitle className="text-lg">4. Settings</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                {/* Show aspect ratio for Character Diagram mode or LoRA text-to-image mode */}
-                {(identitySource === 'character-diagram' || !sourceImage) && (
+                {/* Aspect ratio only for generation mode (no source image) */}
+                {!sourceImage ? (
                   <div className="space-y-2">
                     <Label>Aspect Ratio</Label>
                     <Select
@@ -615,6 +635,13 @@ export default function ImageGeneratorPage() {
                         ))}
                       </SelectContent>
                     </Select>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <Label className="text-muted-foreground">Output Size</Label>
+                    <p className="text-sm text-muted-foreground">
+                      Matches source image dimensions
+                    </p>
                   </div>
                 )}
                 <div className="space-y-2">
@@ -657,17 +684,6 @@ export default function ImageGeneratorPage() {
                 </div>
               )}
 
-              {/* Face Swap Mode info box */}
-              {(identitySource === 'character-diagram' || sourceImage) && (
-                <div className="p-3 bg-blue-500/5 border border-blue-500/20 rounded-md">
-                  <p className="text-sm text-blue-600 font-medium">Face Swap Mode</p>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    {identitySource === 'character-diagram'
-                      ? 'The face from your Character Diagram will be swapped into the source image.'
-                      : 'A reference face will be generated from your LoRA, then swapped into the source image.'}
-                  </p>
-                </div>
-              )}
             </CardContent>
           </Card>
 
@@ -690,12 +706,12 @@ export default function ImageGeneratorPage() {
                 {isGenerating ? (
                   <>
                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    Swapping Face...
+                    {sourceImage ? 'Processing...' : 'Generating...'}
                   </>
                 ) : (
                   <>
                     <Sparkles className="w-4 h-4 mr-2" />
-                    {identitySource === 'character-diagram' || sourceImage ? 'Swap Face' : 'Generate Images'}
+                    {sourceImage ? 'Swap Face' : 'Generate Images'}
                   </>
                 )}
               </Button>
@@ -705,9 +721,7 @@ export default function ImageGeneratorPage() {
                     ? 'Select a LoRA model'
                     : identitySource === 'character-diagram' && !selectedDiagram
                     ? 'Select a Character Diagram'
-                    : identitySource === 'character-diagram' && !sourceImage
-                    ? 'Upload a source image'
-                    : identitySource === 'lora' && !prompt.trim() && !sourceImage
+                    : !sourceImage && !prompt.trim()
                     ? 'Enter a prompt or upload a source image'
                     : ''}
                 </p>

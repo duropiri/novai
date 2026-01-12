@@ -644,7 +644,7 @@ export interface CreateFaceSwapRequest {
   characterDiagramId: string;
   loraId?: string; // Optional - identity comes from character diagram
   // Swap method selection
-  swapMethod?: 'wan_replace' | 'face_swap';
+  swapMethod?: 'kling' | 'wan_replace';
   // WAN Animate Replace settings (only used for wan_replace)
   resolution?: '480p' | '580p' | '720p';
   videoQuality?: 'low' | 'medium' | 'high' | 'maximum';

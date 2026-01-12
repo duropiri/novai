@@ -14,7 +14,7 @@ interface FaceSwapJobData {
   characterDiagramId: string;
   loraId?: string;
   durationSeconds?: number;
-  swapMethod?: 'wan_replace' | 'face_swap';
+  swapMethod?: 'kling' | 'wan_replace';
   // WAN settings
   resolution?: '480p' | '580p' | '720p';
   videoQuality?: 'low' | 'medium' | 'high' | 'maximum';
@@ -104,8 +104,8 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
     this.logger.log(`=== VALIDATED: jobId = ${jobId} ===`);
 
     // Route based on job name
-    if (job.name === 'face-swap-frames') {
-      return this.processFrameByFrame(job);
+    if (job.name === 'kling-motion') {
+      return this.processKlingMotion(job);
     }
     // Default to WAN replace (handles 'wan-replace' and legacy 'swap')
     return this.processWanReplace(job);
@@ -384,7 +384,167 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
   }
 
   /**
-   * Frame-by-frame face swap - preserves original motion exactly
+   * Kling Motion Control method - face swap first frame, then apply motion
+   * Higher quality and more reliable than WAN direct
+   */
+  private async processKlingMotion(job: Job<FaceSwapJobData>): Promise<void> {
+    const jobId = job.data.jobId;
+    this.logger.log(`=== processKlingMotion ENTRY ===`);
+    this.logger.log(`jobId at method entry: "${jobId}" (type: ${typeof jobId})`);
+
+    if (!jobId || jobId === 'undefined') {
+      const errorMsg = `FATAL: jobId invalid at processKlingMotion entry: "${jobId}"`;
+      this.logger.error(errorMsg);
+      throw new Error(errorMsg);
+    }
+
+    const {
+      videoId,
+      videoUrl,
+      faceImageUrl,
+      characterDiagramId,
+      loraId,
+      durationSeconds = 10,
+    } = job.data;
+
+    const fs = await import('fs/promises');
+    const path = await import('path');
+    const os = await import('os');
+    const { exec } = await import('child_process');
+    const { promisify } = await import('util');
+    const execAsync = promisify(exec);
+
+    // Create temp directory
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kling-swap-'));
+    this.logger.log(`[${jobId}] Created temp directory: ${tempDir}`);
+
+    try {
+      await this.jobsService.markJobProcessing(jobId);
+      await this.supabase.updateJob(jobId, { progress: 5 });
+
+      this.logger.log(`[${jobId}] Kling Motion Control method started`);
+      this.logger.log(`[${jobId}] Video URL: ${videoUrl}`);
+      this.logger.log(`[${jobId}] Face Image URL: ${faceImageUrl}`);
+
+      // Step 1: Download source video and extract first frame
+      this.logger.log(`[${jobId}] Step 1: Downloading video and extracting first frame...`);
+      await this.supabase.updateJob(jobId, { progress: 10, external_status: 'EXTRACTING_FRAME' });
+
+      const videoBuffer = await this.downloadBuffer(videoUrl);
+      const inputVideoPath = path.join(tempDir, 'input.mp4');
+      await fs.writeFile(inputVideoPath, videoBuffer);
+
+      const firstFramePath = path.join(tempDir, 'first_frame.png');
+      await execAsync(`ffmpeg -i "${inputVideoPath}" -vf "select=eq(n\\,0)" -vframes 1 "${firstFramePath}"`);
+
+      // Read first frame as base64 for face swap
+      const firstFrameBuffer = await fs.readFile(firstFramePath);
+      const firstFrameBase64 = `data:image/png;base64,${firstFrameBuffer.toString('base64')}`;
+      this.logger.log(`[${jobId}] Step 1: First frame extracted (${firstFrameBuffer.length} bytes)`);
+
+      // Step 2: Face swap on first frame
+      this.logger.log(`[${jobId}] Step 2: Running face swap on first frame...`);
+      await this.supabase.updateJob(jobId, { progress: 25, external_status: 'SWAPPING_FACE' });
+
+      const faceSwapResult = await this.falService.runFaceSwap({
+        base_image_url: firstFrameBase64,
+        swap_image_url: faceImageUrl,
+      });
+
+      if (!faceSwapResult.image?.url) {
+        throw new Error('Face swap returned no image URL');
+      }
+
+      const swappedFrameUrl = faceSwapResult.image.url;
+      this.logger.log(`[${jobId}] Step 2: Face swap completed: ${swappedFrameUrl}`);
+
+      // Step 3: Apply Kling motion control
+      this.logger.log(`[${jobId}] Step 3: Applying Kling motion control...`);
+      await this.supabase.updateJob(jobId, { progress: 40, external_status: 'APPLYING_MOTION' });
+
+      const klingResult = await this.falService.runKlingMotionControl({
+        image_url: swappedFrameUrl,
+        video_url: videoUrl,
+        character_orientation: 'video', // Use video motion as reference
+      });
+
+      if (!klingResult.video?.url) {
+        throw new Error('Kling motion control returned no video URL');
+      }
+
+      this.logger.log(`[${jobId}] Step 3: Kling motion control completed: ${klingResult.video.url}`);
+
+      // Step 4: Download and upload result
+      this.logger.log(`[${jobId}] Step 4: Downloading and uploading result...`);
+      await this.supabase.updateJob(jobId, { progress: 85, external_status: 'UPLOADING' });
+
+      const resultVideoBuffer = await this.downloadBuffer(klingResult.video.url);
+      const filePath = `${videoId}/kling_swapped_${Date.now()}.mp4`;
+      const { url: outputUrl } = await this.supabase.uploadFile(
+        'processed-videos',
+        filePath,
+        resultVideoBuffer,
+        'video/mp4',
+      );
+
+      this.logger.log(`[${jobId}] Step 4: Uploaded to ${outputUrl}`);
+
+      // Step 5: Create video record
+      this.logger.log(`[${jobId}] Step 5: Creating video record...`);
+      await this.supabase.updateJob(jobId, { progress: 95 });
+
+      const swappedVideo = await this.supabase.createVideo({
+        name: `AI Swap (Kling) - ${new Date().toLocaleString()}`,
+        type: 'face_swapped',
+        parent_video_id: videoId,
+        character_diagram_id: characterDiagramId,
+        file_url: outputUrl,
+        duration_seconds: durationSeconds,
+        collection_id: null,
+        thumbnail_url: null,
+        width: null,
+        height: null,
+        file_size_bytes: resultVideoBuffer.length,
+      });
+
+      // Calculate cost: $0.40 flat rate for Kling method
+      const costCents = 40;
+
+      // Mark job completed
+      this.logger.log(`[${jobId}] === MARKING JOB COMPLETED ===`);
+      await this.jobsService.markJobCompleted(
+        jobId,
+        {
+          outputVideoId: swappedVideo.id,
+          outputUrl,
+          loraId,
+          characterDiagramId,
+          method: 'kling',
+        },
+        costCents,
+      );
+
+      this.logger.log(`[${jobId}] Kling face swap completed successfully`, {
+        swappedVideoId: swappedVideo.id,
+        costCents,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`[${jobId}] Kling face swap failed: ${errorMessage}`);
+      await this.jobsService.markJobFailed(jobId, errorMessage);
+      throw error;
+    } finally {
+      // Cleanup temp directory
+      try {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      } catch (cleanupError) {
+        this.logger.warn(`[${jobId}] Failed to cleanup temp directory: ${cleanupError}`);
+      }
+    }
+  }
+
+  /**
+   * Frame-by-frame face swap - preserves original motion exactly (DEPRECATED)
    */
   private async processFrameByFrame(job: Job<FaceSwapJobData>): Promise<void> {
     // CRITICAL: Capture jobId at method start and verify

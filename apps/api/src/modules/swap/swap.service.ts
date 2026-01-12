@@ -10,7 +10,7 @@ export interface CreateFaceSwapDto {
   characterDiagramId: string;
   loraId?: string; // Optional - identity comes from character diagram
   // Swap method selection
-  swapMethod: 'wan_replace' | 'face_swap';
+  swapMethod: 'kling' | 'wan_replace';
   // WAN Animate Replace settings (only used for wan_replace)
   resolution?: '480p' | '580p' | '720p';
   videoQuality?: 'low' | 'medium' | 'high' | 'maximum';
@@ -32,9 +32,8 @@ const WAN_COST_PER_SECOND: Record<string, number> = {
   '720p': 8, // $0.08/second
 };
 
-// Face swap pricing per frame (in cents)
-const FACE_SWAP_COST_PER_FRAME = 0.5; // $0.005/frame
-const ASSUMED_FPS = 30;
+// Kling method pricing (flat rate)
+const KLING_BASE_COST = 40; // $0.40 flat rate for face swap + motion
 
 @Injectable()
 export class SwapService {
@@ -85,10 +84,9 @@ export class SwapService {
 
     // Calculate estimated cost based on swap method
     let estimatedCostCents: number;
-    if (swapMethod === 'face_swap') {
-      // Frame-by-frame: cost per frame
-      const frameCount = Math.ceil(durationSeconds * ASSUMED_FPS);
-      estimatedCostCents = Math.ceil(frameCount * FACE_SWAP_COST_PER_FRAME);
+    if (swapMethod === 'kling') {
+      // Kling: flat rate for face swap + motion control
+      estimatedCostCents = KLING_BASE_COST;
     } else {
       // WAN Replace: cost per second based on resolution
       const costPerSecond = WAN_COST_PER_SECOND[resolution] || 8;
@@ -123,7 +121,7 @@ export class SwapService {
     });
 
     // Queue the face swap job with appropriate job name
-    const jobName = swapMethod === 'face_swap' ? 'face-swap-frames' : 'wan-replace';
+    const jobName = swapMethod === 'kling' ? 'kling-motion' : 'wan-replace';
     await this.faceSwapQueue.add(jobName, {
       jobId: job.id,
       videoId: dto.videoId,
@@ -202,7 +200,7 @@ export class SwapService {
       loraWeightsUrl?: string;
       loraTriggerWord?: string;
       durationSeconds?: number;
-      swapMethod?: 'wan_replace' | 'face_swap';
+      swapMethod?: 'kling' | 'wan_replace';
       resolution?: '480p' | '580p' | '720p';
       videoQuality?: 'low' | 'medium' | 'high' | 'maximum';
       useTurbo?: boolean;
@@ -225,7 +223,7 @@ export class SwapService {
     });
 
     // Re-queue the job with original parameters
-    const jobName = inputPayload.swapMethod === 'face_swap' ? 'face-swap-frames' : 'wan-replace';
+    const jobName = inputPayload.swapMethod === 'kling' ? 'kling-motion' : 'wan-replace';
     await this.faceSwapQueue.add(jobName, {
       jobId: job.id,
       videoId: inputPayload.videoId,

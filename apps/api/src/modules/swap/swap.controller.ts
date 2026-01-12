@@ -27,8 +27,8 @@ class CreateSwapRequestDto {
 
   @IsOptional()
   @IsString()
-  @IsIn(['wan_replace', 'face_swap'])
-  swapMethod?: 'wan_replace' | 'face_swap';
+  @IsIn(['kling', 'wan_replace'])
+  swapMethod?: 'kling' | 'wan_replace';
 
   @IsOptional()
   @IsString()
@@ -69,7 +69,7 @@ export class SwapController {
         videoId: dto.videoId.trim(),
         characterDiagramId: dto.characterDiagramId.trim(),
         loraId: dto.loraId?.trim(),
-        swapMethod: dto.swapMethod || 'wan_replace',
+        swapMethod: dto.swapMethod || 'kling',
         resolution: dto.resolution,
         videoQuality: dto.videoQuality,
         useTurbo: dto.useTurbo,
