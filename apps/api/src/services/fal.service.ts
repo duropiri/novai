@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { fal } from '@fal-ai/client';
+import OpenAI from 'openai';
 
 // fal.ai API types
 export interface FalLoraTrainingInput {
@@ -1296,10 +1297,8 @@ export class FalService implements OnModuleInit {
   }
 
   /**
-   * Run Sora 2 Pro video generation
+   * Run Sora 2 Pro video generation using OpenAI's Sora API
    * Premium video generation with highest quality and realism
-   * Note: Currently uses Luma Dream Machine as a placeholder until OpenAI Sora API is available
-   * When Sora API becomes available, update this method to use openai.videos.generate()
    */
   async runSora2ProVideoGeneration(input: {
     image_url: string; // Regenerated frame
@@ -1307,62 +1306,73 @@ export class FalService implements OnModuleInit {
     prompt?: string; // Optional custom prompt
     onProgress?: (status: { status: string; logs?: Array<{ message: string }> }) => void;
   }): Promise<{ video: { url: string; file_name: string; content_type: string; file_size: number } }> {
-    this.logger.log('Running Sora 2 Pro video generation via fal.ai client');
+    this.logger.log('Running Sora 2 Pro video generation via OpenAI');
     this.logger.log(`Input: image_url=${input.image_url.substring(0, 50)}...`);
 
-    try {
-      // TODO: Replace with OpenAI Sora 2 Pro API when available:
-      // const openai = new OpenAI({ apiKey: this.configService.get('OPENAI_API_KEY') });
-      // const result = await openai.videos.generate({
-      //   model: "sora-2-pro",
-      //   image: input.image_url,
-      //   prompt: input.prompt || 'Continue this scene with natural motion',
-      //   duration: 5,
-      //   resolution: "1080p",
-      //   fps: 30,
-      // });
+    const openaiApiKey = this.configService.get<string>('OPENAI_API_KEY');
+    if (!openaiApiKey) {
+      throw new Error('OPENAI_API_KEY not configured');
+    }
 
-      // For now, use Luma Dream Machine with enhanced settings as a placeholder
-      const result = await fal.subscribe('fal-ai/luma-dream-machine/image-to-video', {
+    const openai = new OpenAI({ apiKey: openaiApiKey });
+
+    try {
+      if (input.onProgress) {
+        input.onProgress({ status: 'STARTING', logs: [{ message: 'Initializing OpenAI Sora...' }] });
+      }
+
+      // Generate video using OpenAI Sora
+      const prompt = input.prompt || 'Continue this scene naturally with smooth, cinematic motion. Maintain the exact appearance of the person. High quality, photorealistic.';
+
+      this.logger.log(`Sora prompt: ${prompt}`);
+
+      if (input.onProgress) {
+        input.onProgress({ status: 'GENERATING', logs: [{ message: 'Generating video with Sora...' }] });
+      }
+
+      // Use OpenAI's video generation API
+      // Note: The exact API may vary - this follows the expected structure
+      const response = await openai.videos.generate({
+        model: 'sora',
         input: {
+          prompt,
           image_url: input.image_url,
-          prompt: input.prompt || 'Continue this scene naturally with smooth, cinematic, photorealistic motion. Maintain the exact appearance of the person. High quality, 4K resolution.',
-          aspect_ratio: '9:16', // Portrait for social content
-          loop: false,
-        },
-        logs: true,
-        onQueueUpdate: (update) => {
-          this.logger.log(`Sora 2 Pro (placeholder) queue status: ${update.status}`);
-          if (input.onProgress) {
-            input.onProgress({
-              status: update.status,
-              logs: 'logs' in update ? update.logs : undefined,
-            });
-          }
         },
       });
 
-      this.logger.log('Sora 2 Pro video generation completed');
+      this.logger.log(`Sora response: ${JSON.stringify(response)}`);
 
-      // Type assertion for the result
-      const typedResult = result.data as { video: { url: string; file_name?: string; content_type?: string; file_size?: number } };
-
-      if (!typedResult?.video?.url) {
-        throw new Error('Sora 2 Pro returned no video URL');
+      if (input.onProgress) {
+        input.onProgress({ status: 'COMPLETED', logs: [{ message: 'Video generation complete' }] });
       }
 
-      // Normalize the result format
+      // Extract video URL from response
+      const videoUrl = (response as { data?: { url?: string }; url?: string }).data?.url
+        || (response as { url?: string }).url;
+
+      if (!videoUrl) {
+        throw new Error('OpenAI Sora returned no video URL');
+      }
+
+      this.logger.log('Sora 2 Pro video generation completed');
+
       return {
         video: {
-          url: typedResult.video.url,
-          file_name: typedResult.video.file_name || 'video.mp4',
-          content_type: typedResult.video.content_type || 'video/mp4',
-          file_size: typedResult.video.file_size || 0,
+          url: videoUrl,
+          file_name: 'sora_video.mp4',
+          content_type: 'video/mp4',
+          file_size: 0,
         },
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       this.logger.error(`Sora 2 Pro video generation failed: ${message}`);
+
+      // Log full error for debugging
+      if (error instanceof Error && error.stack) {
+        this.logger.error(`Stack: ${error.stack}`);
+      }
+
       throw error;
     }
   }

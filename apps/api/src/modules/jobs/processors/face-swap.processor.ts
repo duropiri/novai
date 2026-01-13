@@ -379,14 +379,13 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
           ]);
           break;
         case 'sora2pro':
-          // Sora 2 Pro uses Kling with premium settings (OpenAI Sora API not yet available)
-          actualModelUsed = 'kling';
-          await this.addLog(jobId, `Starting Sora 2 Pro video generation (via Kling)...`);
+          // Sora 2 Pro uses OpenAI's Sora API
+          actualModelUsed = 'sora2pro';
+          await this.addLog(jobId, `Starting OpenAI Sora video generation...`);
           videoResult = await Promise.race([
-            this.falService.runKlingMotionControl({
+            this.falService.runSora2ProVideoGeneration({
               image_url: primaryFrameUrl,
               video_url: videoUrl,
-              character_orientation: 'video',
               onProgress: onFalProgress,
             }),
             timeoutPromise,
