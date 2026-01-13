@@ -731,14 +731,15 @@ export default function AISwapperPage() {
                   logs?: string[];
                 } | null;
                 const firstFrameSkipped = outputPayload?.first_frame_skipped;
-                // Use actualModelUsed (what was really called) over videoModel (what was selected)
-                const actualModel = outputPayload?.actualModelUsed || outputPayload?.videoModel;
+                const selectedModel = outputPayload?.videoModel;
+                const actualModel = outputPayload?.actualModelUsed;
                 const logs = outputPayload?.logs || [];
 
                 // Model display name mapping
                 const modelDisplayNames: Record<string, string> = {
                   kling: 'Kling',
                   luma: 'Luma',
+                  sora2pro: 'Sora 2 Pro',
                   wan: 'WAN',
                 };
 
@@ -756,11 +757,20 @@ export default function AISwapperPage() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         {getJobStatusBadge(job)}
-                        {/* Model Badge - shows the actual model used */}
-                        {actualModel && (
-                          <Badge variant="outline" className="text-xs">
-                            {modelDisplayNames[actualModel] || actualModel}
-                          </Badge>
+                        {/* Model Badges - show selected and actual when they differ */}
+                        {(selectedModel || actualModel) && (
+                          <>
+                            {selectedModel && (
+                              <Badge variant="outline" className="text-xs">
+                                {modelDisplayNames[selectedModel] || selectedModel}
+                              </Badge>
+                            )}
+                            {actualModel && actualModel !== selectedModel && (
+                              <Badge variant="secondary" className="text-xs">
+                                via {modelDisplayNames[actualModel] || actualModel}
+                              </Badge>
+                            )}
+                          </>
                         )}
                         {job.progress > 0 && job.progress < 100 && (
                           <span className="text-xs text-muted-foreground">{job.progress}%</span>
