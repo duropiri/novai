@@ -181,11 +181,16 @@ export default function AISwapperPage() {
     fetchReferenceKits();
     fetchLoras();
     fetchJobs();
-
-    // Poll for job updates
-    const interval = setInterval(fetchJobs, 5000);
-    return () => clearInterval(interval);
   }, [fetchVideos, fetchDiagrams, fetchReferenceKits, fetchLoras, fetchJobs]);
+
+  // Poll for job updates - faster when there's an active job
+  useEffect(() => {
+    const hasActiveJob = recentJobs.some((j) => j.status === 'processing' || j.status === 'queued');
+    const pollInterval = hasActiveJob ? 2000 : 5000; // 2s when active, 5s otherwise
+
+    const interval = setInterval(fetchJobs, pollInterval);
+    return () => clearInterval(interval);
+  }, [fetchJobs, recentJobs]);
 
   // === COST CALCULATION ===
   const calculateEstimatedCost = useCallback(() => {
@@ -713,52 +718,68 @@ export default function AISwapperPage() {
           ) : (
             <div className="space-y-3">
               {recentJobs.map((job) => {
-                const outputPayload = job.output_payload as { first_frame_skipped?: boolean; skip_reason?: string } | null;
+                const inputPayload = job.input_payload as { videoModel?: string; loraId?: string; targetFaceSource?: string } | null;
+                const outputPayload = job.output_payload as { first_frame_skipped?: boolean; skip_reason?: string; logs?: string[] } | null;
                 const firstFrameSkipped = outputPayload?.first_frame_skipped;
+                const videoModel = inputPayload?.videoModel || 'kling';
+                const logs = outputPayload?.logs || [];
+
+                // Model display name mapping
+                const modelDisplayNames: Record<string, string> = {
+                  kling: 'Kling',
+                  luma: 'Luma',
+                  sora2pro: 'Sora 2 Pro',
+                  wan: 'WAN',
+                };
 
                 return (
                 <div
                   key={job.id}
-                  className={`border rounded-lg p-3 flex items-center gap-3 ${
+                  className={`border rounded-lg p-3 ${
                     isJobStuck(job) ? 'border-yellow-500/50 bg-yellow-500/5' : ''
                   }`}
                 >
-                  <div className="w-16 h-12 bg-muted rounded flex items-center justify-center flex-shrink-0">
-                    <Video className="w-6 h-6 text-muted-foreground" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      {getJobStatusBadge(job)}
-                      {job.progress > 0 && job.progress < 100 && (
-                        <span className="text-xs text-muted-foreground">{job.progress}%</span>
-                      )}
-                      {isJobStuck(job) && (
-                        <Badge variant="outline" className="text-yellow-600 border-yellow-500/50 text-xs">
-                          Stuck
+                  <div className="flex items-center gap-3">
+                    <div className="w-16 h-12 bg-muted rounded flex items-center justify-center flex-shrink-0">
+                      <Video className="w-6 h-6 text-muted-foreground" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {getJobStatusBadge(job)}
+                        {/* Model Badge */}
+                        <Badge variant="outline" className="text-xs">
+                          {modelDisplayNames[videoModel] || videoModel}
                         </Badge>
+                        {job.progress > 0 && job.progress < 100 && (
+                          <span className="text-xs text-muted-foreground">{job.progress}%</span>
+                        )}
+                        {isJobStuck(job) && (
+                          <Badge variant="outline" className="text-yellow-600 border-yellow-500/50 text-xs">
+                            Stuck
+                          </Badge>
+                        )}
+                        {/* First Frame Skipped Indicator */}
+                        {firstFrameSkipped && (
+                          <Badge className="bg-yellow-100 text-yellow-800 border-yellow-300 text-xs">
+                            <AlertTriangle className="w-3 h-3 mr-1" />
+                            Frame Skipped
+                          </Badge>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {new Date(job.created_at).toLocaleString()}
+                      </p>
+                      {/* Skip warning message for completed jobs */}
+                      {firstFrameSkipped && job.status === 'completed' && (
+                        <p className="text-xs text-yellow-700 mt-1 flex items-center gap-1">
+                          <AlertTriangle className="w-3 h-3" />
+                          AI frame gen skipped (safety filter). Basic face swap used.
+                        </p>
                       )}
-                      {/* First Frame Skipped Indicator */}
-                      {firstFrameSkipped && (
-                        <Badge className="bg-yellow-100 text-yellow-800 border-yellow-300 text-xs">
-                          <AlertTriangle className="w-3 h-3 mr-1" />
-                          Frame Skipped
-                        </Badge>
+                      {job.error_message && (
+                        <p className="text-xs text-destructive mt-1 truncate">{job.error_message}</p>
                       )}
                     </div>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      {new Date(job.created_at).toLocaleString()}
-                    </p>
-                    {/* Skip warning message for completed jobs */}
-                    {firstFrameSkipped && job.status === 'completed' && (
-                      <p className="text-xs text-yellow-700 mt-1 flex items-center gap-1">
-                        <AlertTriangle className="w-3 h-3" />
-                        AI frame gen skipped (safety filter). Basic face swap used.
-                      </p>
-                    )}
-                    {job.error_message && (
-                      <p className="text-xs text-destructive mt-1 truncate">{job.error_message}</p>
-                    )}
-                  </div>
                   <div className="flex gap-1">
                     {(job.status === 'failed' || isJobStuck(job)) && (
                       <Button
@@ -799,6 +820,20 @@ export default function AISwapperPage() {
                       <Trash2 className="w-4 h-4" />
                     </Button>
                   </div>
+                  </div>
+                  {/* Live Logs for Processing Jobs */}
+                  {job.status === 'processing' && logs.length > 0 && (
+                    <div className="mt-3 pt-3 border-t">
+                      <div className="text-xs font-medium text-muted-foreground mb-2">Live Logs:</div>
+                      <div className="bg-muted/50 rounded p-2 max-h-32 overflow-y-auto font-mono text-xs space-y-0.5">
+                        {logs.slice(-10).map((log, idx) => (
+                          <div key={idx} className="text-muted-foreground">
+                            {log}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
                 );
               })}

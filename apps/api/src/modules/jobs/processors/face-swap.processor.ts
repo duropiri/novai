@@ -325,44 +325,62 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
         setTimeout(() => reject(new JobTimeoutError(videoTimeoutMs)), videoTimeoutMs);
       });
 
+      // Progress callback for fal.ai status updates
+      const onFalProgress = async (status: { status: string; logs?: Array<{ message: string }> }) => {
+        await this.addLog(jobId, `[${videoModel.toUpperCase()}] Status: ${status.status}`);
+        if (status.logs?.length) {
+          for (const log of status.logs.slice(-2)) {
+            await this.addLog(jobId, `[fal.ai] ${log.message}`);
+          }
+        }
+      };
+
       switch (videoModel) {
         case 'wan':
+          await this.addLog(jobId, `Starting WAN v2.2 video generation...`);
           videoResult = await Promise.race([
             this.falService.runWanVideoGeneration({
               image_url: primaryFrameUrl,
               video_url: videoUrl,
               resolution: '720p',
+              onProgress: onFalProgress,
             }),
             timeoutPromise,
           ]);
           break;
         case 'luma':
           // Luma Dream Machine (premium quality)
+          await this.addLog(jobId, `Starting Luma Dream Machine video generation...`);
           videoResult = await Promise.race([
             this.falService.runSoraVideoGeneration({
               image_url: primaryFrameUrl,
               video_url: videoUrl,
+              onProgress: onFalProgress,
             }),
             timeoutPromise,
           ]);
           break;
         case 'sora2pro':
           // Sora 2 Pro (OpenAI's premium model)
+          await this.addLog(jobId, `Starting Sora 2 Pro video generation...`);
           videoResult = await Promise.race([
             this.falService.runSora2ProVideoGeneration({
               image_url: primaryFrameUrl,
               video_url: videoUrl,
+              onProgress: onFalProgress,
             }),
             timeoutPromise,
           ]);
           break;
         case 'kling':
         default:
+          await this.addLog(jobId, `Starting Kling v2.6 motion control...`);
           videoResult = await Promise.race([
             this.falService.runKlingMotionControl({
               image_url: primaryFrameUrl,
               video_url: videoUrl,
               character_orientation: 'video',
+              onProgress: onFalProgress,
             }),
             timeoutPromise,
           ]);
@@ -542,14 +560,46 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
   }
 
   /**
-   * Helper to update progress with stage info
+   * Helper to update progress with stage info and store logs
    */
   private async updateProgress(jobId: string, progress: number, stage: string): Promise<void> {
+    const timestamp = new Date().toLocaleTimeString();
+    const logMessage = `[${timestamp}] ${stage}`;
+
+    // Get current output_payload to append log
+    const currentJob = await this.supabase.getJob(jobId);
+    const existingPayload = (currentJob?.output_payload as Record<string, unknown>) || {};
+    const existingLogs = (existingPayload.logs as string[]) || [];
+
     await this.supabase.updateJob(jobId, {
       progress,
       external_status: stage,
+      output_payload: {
+        ...existingPayload,
+        logs: [...existingLogs, logMessage],
+      },
     });
     this.logger.log(`[${jobId}] Progress: ${progress}% - ${stage}`);
+  }
+
+  /**
+   * Add a log entry without updating progress
+   */
+  private async addLog(jobId: string, message: string): Promise<void> {
+    const timestamp = new Date().toLocaleTimeString();
+    const logMessage = `[${timestamp}] ${message}`;
+
+    const currentJob = await this.supabase.getJob(jobId);
+    const existingPayload = (currentJob?.output_payload as Record<string, unknown>) || {};
+    const existingLogs = (existingPayload.logs as string[]) || [];
+
+    await this.supabase.updateJob(jobId, {
+      output_payload: {
+        ...existingPayload,
+        logs: [...existingLogs, logMessage],
+      },
+    });
+    this.logger.log(`[${jobId}] Log: ${message}`);
   }
 
   /**
