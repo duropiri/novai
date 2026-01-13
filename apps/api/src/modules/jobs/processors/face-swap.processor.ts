@@ -26,7 +26,7 @@ interface AdvancedSwapJobData {
   loraTriggerWord?: string;
   // Video settings
   durationSeconds: number;
-  videoModel: 'kling' | 'luma' | 'wan';
+  videoModel: 'kling' | 'luma' | 'sora2pro' | 'wan';
   // Processing options
   keepOriginalOutfit: boolean;
   upscaleMethod: 'real-esrgan' | 'clarity' | 'creative' | 'none';
@@ -346,6 +346,16 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
             timeoutPromise,
           ]);
           break;
+        case 'sora2pro':
+          // Sora 2 Pro (OpenAI's premium model)
+          videoResult = await Promise.race([
+            this.falService.runSora2ProVideoGeneration({
+              image_url: primaryFrameUrl,
+              video_url: videoUrl,
+            }),
+            timeoutPromise,
+          ]);
+          break;
         case 'kling':
         default:
           videoResult = await Promise.race([
@@ -512,6 +522,7 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
     const VIDEO_MODEL_COSTS: Record<string, number> = {
       kling: 40, // Kling v2.6 Pro ~$0.40/5s
       luma: 100, // Luma Dream Machine ~$1.00/5s
+      sora2pro: 100, // Sora 2 Pro ~$1.00/5s
       wan: 20, // WAN v2.2 ~$0.20/5s
     };
 

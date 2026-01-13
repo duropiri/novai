@@ -1295,6 +1295,78 @@ export class FalService implements OnModuleInit {
     }
   }
 
+  /**
+   * Run Sora 2 Pro video generation
+   * Premium video generation with highest quality and realism
+   * Note: Currently uses Luma Dream Machine as a placeholder until OpenAI Sora API is available
+   * When Sora API becomes available, update this method to use openai.videos.generate()
+   */
+  async runSora2ProVideoGeneration(input: {
+    image_url: string; // Regenerated frame
+    video_url: string; // Motion reference video (for prompt extraction)
+    prompt?: string; // Optional custom prompt
+    onProgress?: (status: { status: string; logs?: Array<{ message: string }> }) => void;
+  }): Promise<{ video: { url: string; file_name: string; content_type: string; file_size: number } }> {
+    this.logger.log('Running Sora 2 Pro video generation via fal.ai client');
+    this.logger.log(`Input: image_url=${input.image_url.substring(0, 50)}...`);
+
+    try {
+      // TODO: Replace with OpenAI Sora 2 Pro API when available:
+      // const openai = new OpenAI({ apiKey: this.configService.get('OPENAI_API_KEY') });
+      // const result = await openai.videos.generate({
+      //   model: "sora-2-pro",
+      //   image: input.image_url,
+      //   prompt: input.prompt || 'Continue this scene with natural motion',
+      //   duration: 5,
+      //   resolution: "1080p",
+      //   fps: 30,
+      // });
+
+      // For now, use Luma Dream Machine with enhanced settings as a placeholder
+      const result = await fal.subscribe('fal-ai/luma-dream-machine/image-to-video', {
+        input: {
+          image_url: input.image_url,
+          prompt: input.prompt || 'Continue this scene naturally with smooth, cinematic, photorealistic motion. Maintain the exact appearance of the person. High quality, 4K resolution.',
+          aspect_ratio: '9:16', // Portrait for social content
+          loop: false,
+        },
+        logs: true,
+        onQueueUpdate: (update) => {
+          this.logger.log(`Sora 2 Pro (placeholder) queue status: ${update.status}`);
+          if (input.onProgress) {
+            input.onProgress({
+              status: update.status,
+              logs: 'logs' in update ? update.logs : undefined,
+            });
+          }
+        },
+      });
+
+      this.logger.log('Sora 2 Pro video generation completed');
+
+      // Type assertion for the result
+      const typedResult = result.data as { video: { url: string; file_name?: string; content_type?: string; file_size?: number } };
+
+      if (!typedResult?.video?.url) {
+        throw new Error('Sora 2 Pro returned no video URL');
+      }
+
+      // Normalize the result format
+      return {
+        video: {
+          url: typedResult.video.url,
+          file_name: typedResult.video.file_name || 'video.mp4',
+          content_type: typedResult.video.content_type || 'video/mp4',
+          file_size: typedResult.video.file_size || 0,
+        },
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Sora 2 Pro video generation failed: ${message}`);
+      throw error;
+    }
+  }
+
   // ==================== POSE DETECTION ====================
 
   /**

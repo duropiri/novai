@@ -38,8 +38,8 @@ class CreateSwapRequestDto {
 
   // Video generation model - REQUIRED
   @IsString()
-  @IsIn(['kling', 'luma', 'wan'])
-  videoModel!: 'kling' | 'luma' | 'wan';
+  @IsIn(['kling', 'luma', 'sora2pro', 'wan'])
+  videoModel!: 'kling' | 'luma' | 'sora2pro' | 'wan';
 
   // Processing options
   @IsBoolean()

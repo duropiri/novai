@@ -14,7 +14,7 @@ export interface CreateFaceSwapDto {
   // LoRA model - REQUIRED for advanced pipeline
   loraId: string;
   // Video generation model
-  videoModel: 'kling' | 'luma' | 'wan';
+  videoModel: 'kling' | 'luma' | 'sora2pro' | 'wan';
   // Processing options
   keepOriginalOutfit: boolean;
   // Upscaling options
@@ -39,6 +39,7 @@ const POSE_DETECTION_COST = 1; // ~$0.01 per frame for DWPose
 const VIDEO_MODEL_COSTS: Record<string, number> = {
   kling: 40,  // Kling v2.6 Pro ~$0.40/5s
   luma: 100,  // Luma Dream Machine ~$1.00/5s (premium)
+  sora2pro: 100, // Sora 2 Pro ~$1.00/5s (premium)
   wan: 20,    // WAN v2.2 ~$0.20/5s (fast)
 };
 

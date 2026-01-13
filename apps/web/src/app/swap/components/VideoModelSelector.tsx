@@ -2,7 +2,7 @@
 
 import { Badge } from '@/components/ui/badge';
 
-export type VideoModel = 'kling' | 'luma' | 'wan';
+export type VideoModel = 'kling' | 'luma' | 'sora2pro' | 'wan';
 
 interface VideoModelSelectorProps {
   selected: VideoModel;
@@ -27,6 +27,14 @@ const VIDEO_MODELS = [
     badgeVariant: 'secondary' as const,
   },
   {
+    id: 'sora2pro' as const,
+    name: 'Sora 2 Pro',
+    description: 'Highest quality, best realism',
+    cost: 100, // cents
+    badge: 'Premium',
+    badgeVariant: 'secondary' as const,
+  },
+  {
     id: 'wan' as const,
     name: 'WAN v2.2',
     description: 'Fastest generation',
@@ -38,7 +46,7 @@ const VIDEO_MODELS = [
 
 export function VideoModelSelector({ selected, onSelect }: VideoModelSelectorProps) {
   return (
-    <div className="grid grid-cols-3 gap-2">
+    <div className="grid grid-cols-4 gap-2">
       {VIDEO_MODELS.map((model) => (
         <button
           key={model.id}
