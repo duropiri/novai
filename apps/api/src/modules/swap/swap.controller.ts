@@ -8,7 +8,7 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
-import { IsString, IsNotEmpty, IsOptional, IsBoolean, IsNumber, IsIn } from 'class-validator';
+import { IsString, IsNotEmpty, IsOptional, IsBoolean, IsNumber, IsIn, Min, Max, IsUrl } from 'class-validator';
 import { Type } from 'class-transformer';
 import { SwapService, CreateFaceSwapDto } from './swap.service';
 
@@ -17,37 +17,50 @@ class CreateSwapRequestDto {
   @IsNotEmpty()
   videoId!: string;
 
+  // Target face - at least one required (uploaded URL, character diagram, or reference kit)
+  @IsOptional()
+  @IsString()
+  @IsUrl()
+  uploadedFaceUrl?: string;
+
+  @IsOptional()
+  @IsString()
+  characterDiagramId?: string;
+
+  @IsOptional()
+  @IsString()
+  referenceKitId?: string;
+
+  // LoRA model - REQUIRED for advanced pipeline
   @IsString()
   @IsNotEmpty()
-  characterDiagramId!: string;
+  loraId!: string;
 
+  // Video generation model - REQUIRED
   @IsString()
-  @IsOptional()
-  loraId?: string;
+  @IsIn(['kling', 'luma', 'wan'])
+  videoModel!: 'kling' | 'luma' | 'wan';
 
-  @IsOptional()
-  @IsString()
-  @IsIn(['kling', 'wan_replace'])
-  swapMethod?: 'kling' | 'wan_replace';
-
-  @IsOptional()
-  @IsString()
-  @IsIn(['480p', '580p', '720p'])
-  resolution?: '480p' | '580p' | '720p';
-
-  @IsOptional()
-  @IsString()
-  @IsIn(['low', 'medium', 'high', 'maximum'])
-  videoQuality?: 'low' | 'medium' | 'high' | 'maximum';
-
-  @IsOptional()
+  // Processing options
   @IsBoolean()
-  useTurbo?: boolean;
+  keepOriginalOutfit!: boolean;
+
+  // Upscaling options
+  @IsString()
+  @IsIn(['real-esrgan', 'clarity', 'creative', 'none'])
+  upscaleMethod!: 'real-esrgan' | 'clarity' | 'creative' | 'none';
 
   @IsOptional()
+  @IsString()
+  @IsIn(['2k', '4k'])
+  upscaleResolution?: '2k' | '4k';
+
+  // Key frame count for processing (5-10)
   @IsNumber()
+  @Min(5)
+  @Max(10)
   @Type(() => Number)
-  inferenceSteps?: number;
+  keyFrameCount!: number;
 }
 
 @Controller('swap')
@@ -59,21 +72,29 @@ export class SwapController {
     if (!dto.videoId?.trim()) {
       throw new HttpException('Video ID is required', HttpStatus.BAD_REQUEST);
     }
-    if (!dto.characterDiagramId?.trim()) {
-      throw new HttpException('Character Diagram ID is required', HttpStatus.BAD_REQUEST);
+
+    // Validate target face - at least one source required
+    if (!dto.uploadedFaceUrl?.trim() && !dto.characterDiagramId?.trim() && !dto.referenceKitId?.trim()) {
+      throw new HttpException('Target face is required (upload URL, Character Diagram ID, or Reference Kit ID)', HttpStatus.BAD_REQUEST);
     }
-    // LoRA is optional - Kling uses character diagram for identity
+
+    // LoRA is now required
+    if (!dto.loraId?.trim()) {
+      throw new HttpException('LoRA model ID is required', HttpStatus.BAD_REQUEST);
+    }
 
     try {
       const result = await this.swapService.createFaceSwap({
         videoId: dto.videoId.trim(),
-        characterDiagramId: dto.characterDiagramId.trim(),
-        loraId: dto.loraId?.trim(),
-        swapMethod: dto.swapMethod || 'kling',
-        resolution: dto.resolution,
-        videoQuality: dto.videoQuality,
-        useTurbo: dto.useTurbo,
-        inferenceSteps: dto.inferenceSteps,
+        uploadedFaceUrl: dto.uploadedFaceUrl?.trim(),
+        characterDiagramId: dto.characterDiagramId?.trim(),
+        referenceKitId: dto.referenceKitId?.trim(),
+        loraId: dto.loraId.trim(),
+        videoModel: dto.videoModel,
+        keepOriginalOutfit: dto.keepOriginalOutfit,
+        upscaleMethod: dto.upscaleMethod,
+        upscaleResolution: dto.upscaleResolution,
+        keyFrameCount: dto.keyFrameCount,
       });
 
       return {

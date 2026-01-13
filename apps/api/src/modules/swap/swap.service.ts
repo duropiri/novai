@@ -7,33 +7,48 @@ import { QUEUES } from '../jobs/queues.constants';
 
 export interface CreateFaceSwapDto {
   videoId: string;
-  characterDiagramId: string;
-  loraId?: string; // Optional - identity comes from character diagram
-  // Swap method selection
-  swapMethod: 'kling' | 'wan_replace';
-  // WAN Animate Replace settings (only used for wan_replace)
-  resolution?: '480p' | '580p' | '720p';
-  videoQuality?: 'low' | 'medium' | 'high' | 'maximum';
-  useTurbo?: boolean;
-  inferenceSteps?: number;
+  // Target face - at least one required
+  uploadedFaceUrl?: string;
+  characterDiagramId?: string;
+  referenceKitId?: string;
+  // LoRA model - REQUIRED for advanced pipeline
+  loraId: string;
+  // Video generation model
+  videoModel: 'kling' | 'luma' | 'wan';
+  // Processing options
+  keepOriginalOutfit: boolean;
+  // Upscaling options
+  upscaleMethod: 'real-esrgan' | 'clarity' | 'creative' | 'none';
+  upscaleResolution?: '2k' | '4k';
+  // Key frame count (5-10)
+  keyFrameCount: number;
 }
 
 export interface FaceSwapResult {
   jobId: string;
   videoId: string;
-  characterDiagramId: string;
+  targetFaceSource: string;
   estimatedCostCents: number;
 }
 
-// WAN pricing per second by resolution (in cents)
-const WAN_COST_PER_SECOND: Record<string, number> = {
-  '480p': 4, // $0.04/second
-  '580p': 6, // $0.06/second
-  '720p': 8, // $0.08/second
+// Cost constants (in cents)
+const GEMINI_COST = 2; // ~$0.02 for Gemini frame regeneration
+const POSE_DETECTION_COST = 1; // ~$0.01 per frame for DWPose
+
+// Video model costs (in cents) - approximate for 5 second video
+const VIDEO_MODEL_COSTS: Record<string, number> = {
+  kling: 40,  // Kling v2.6 Pro ~$0.40/5s
+  luma: 100,  // Luma Dream Machine ~$1.00/5s (premium)
+  wan: 20,    // WAN v2.2 ~$0.20/5s (fast)
 };
 
-// Kling method pricing (flat rate)
-const KLING_BASE_COST = 40; // $0.40 flat rate for face swap + motion
+// Upscaling costs (in cents)
+const UPSCALE_COSTS: Record<string, number> = {
+  'real-esrgan': 5,  // ~$0.05 fast upscaling
+  'clarity': 15,     // ~$0.15 quality upscaling
+  'creative': 20,    // ~$0.20 AI-enhanced upscaling
+  'none': 0,
+};
 
 @Injectable()
 export class SwapService {
@@ -46,59 +61,74 @@ export class SwapService {
   ) {}
 
   async createFaceSwap(dto: CreateFaceSwapDto): Promise<FaceSwapResult> {
+    // Validate target face - at least one source required
+    if (!dto.uploadedFaceUrl && !dto.characterDiagramId && !dto.referenceKitId) {
+      throw new Error('Target face is required (uploadedFaceUrl, characterDiagramId, or referenceKitId)');
+    }
+
     // Get video details
     const video = await this.supabase.getVideo(dto.videoId);
     if (!video) {
       throw new Error('Video not found');
     }
 
-    // Get character diagram details
-    const diagram = await this.supabase.getCharacterDiagram(dto.characterDiagramId);
-    if (!diagram) {
-      throw new Error('Character diagram not found');
+    // Get target face URL and determine source type
+    let targetFaceUrl: string;
+    let targetFaceSource: 'upload' | 'character_diagram' | 'reference_kit';
+
+    if (dto.uploadedFaceUrl) {
+      // Direct upload
+      targetFaceUrl = dto.uploadedFaceUrl;
+      targetFaceSource = 'upload';
+    } else if (dto.characterDiagramId) {
+      // Character diagram
+      const diagram = await this.supabase.getCharacterDiagram(dto.characterDiagramId);
+      if (!diagram) {
+        throw new Error('Character diagram not found');
+      }
+      if (diagram.status !== 'ready' || !diagram.file_url) {
+        throw new Error('Character diagram is not ready');
+      }
+      targetFaceUrl = diagram.file_url;
+      targetFaceSource = 'character_diagram';
+    } else {
+      // Reference kit
+      const kit = await this.supabase.getReferenceKit(dto.referenceKitId!);
+      if (!kit) {
+        throw new Error('Reference kit not found');
+      }
+      if (kit.status !== 'ready' || !kit.anchor_face_url) {
+        throw new Error('Reference kit is not ready (missing anchor face)');
+      }
+      targetFaceUrl = kit.anchor_face_url;
+      targetFaceSource = 'reference_kit';
     }
 
-    if (diagram.status !== 'ready' || !diagram.file_url) {
-      throw new Error('Character diagram is not ready');
+    // Get LoRA model (REQUIRED)
+    const lora = await this.supabase.getLoraModel(dto.loraId);
+    if (!lora) {
+      throw new Error('LoRA model not found');
     }
-
-    // LoRA is optional - identity comes from character diagram
-    let loraData: { weightsUrl?: string; triggerWord?: string } = {};
-    if (dto.loraId) {
-      const lora = await this.supabase.getLoraModel(dto.loraId);
-      if (!lora) {
-        throw new Error('LoRA model not found');
-      }
-      if (lora.status !== 'ready' || !lora.weights_url) {
-        throw new Error('LoRA model is not ready');
-      }
-      loraData = {
-        weightsUrl: lora.weights_url,
-        triggerWord: lora.trigger_word,
-      };
+    if (lora.status !== 'ready' || !lora.weights_url) {
+      throw new Error('LoRA model is not ready');
     }
 
     const durationSeconds = video.duration_seconds || 10;
-    const resolution = dto.resolution || '720p';
-    const swapMethod = dto.swapMethod;
 
-    // Calculate estimated cost based on swap method
-    let estimatedCostCents: number;
-    if (swapMethod === 'kling') {
-      // Kling: flat rate for face swap + motion control
-      estimatedCostCents = KLING_BASE_COST;
-    } else {
-      // WAN Replace: cost per second based on resolution
-      const costPerSecond = WAN_COST_PER_SECOND[resolution] || 8;
-      estimatedCostCents = Math.ceil(durationSeconds * costPerSecond);
-    }
+    // Calculate estimated cost
+    const estimatedCostCents = this.calculateCost({
+      videoModel: dto.videoModel,
+      upscaleMethod: dto.upscaleMethod,
+      keyFrameCount: dto.keyFrameCount,
+    });
 
-    this.logger.log(`Creating face swap job`, {
+    this.logger.log(`Creating advanced face swap job`, {
       videoId: dto.videoId,
-      characterDiagramId: dto.characterDiagramId,
+      targetFaceSource,
       loraId: dto.loraId,
-      swapMethod,
-      resolution,
+      videoModel: dto.videoModel,
+      upscaleMethod: dto.upscaleMethod,
+      keyFrameCount: dto.keyFrameCount,
       durationSeconds,
       estimatedCostCents,
     });
@@ -107,49 +137,65 @@ export class SwapService {
     const job = await this.jobsService.createJob('face_swap', dto.videoId, {
       videoId: dto.videoId,
       videoUrl: video.file_url,
+      targetFaceUrl,
+      targetFaceSource,
       characterDiagramId: dto.characterDiagramId,
-      faceImageUrl: diagram.file_url,
+      referenceKitId: dto.referenceKitId,
+      uploadedFaceUrl: dto.uploadedFaceUrl,
       loraId: dto.loraId,
-      loraWeightsUrl: loraData.weightsUrl,
-      loraTriggerWord: loraData.triggerWord,
+      loraWeightsUrl: lora.weights_url,
+      loraTriggerWord: lora.trigger_word,
       durationSeconds,
-      swapMethod,
-      resolution,
-      videoQuality: dto.videoQuality,
-      useTurbo: dto.useTurbo,
-      inferenceSteps: dto.inferenceSteps,
+      videoModel: dto.videoModel,
+      keepOriginalOutfit: dto.keepOriginalOutfit,
+      upscaleMethod: dto.upscaleMethod,
+      upscaleResolution: dto.upscaleResolution || '2k',
+      keyFrameCount: dto.keyFrameCount,
     });
 
-    // Queue the face swap job with appropriate job name
-    const jobName = swapMethod === 'kling' ? 'kling-motion' : 'wan-replace';
-    await this.faceSwapQueue.add(jobName, {
+    // Queue the advanced swap job
+    await this.faceSwapQueue.add('advanced-swap', {
       jobId: job.id,
       videoId: dto.videoId,
       videoUrl: video.file_url,
-      faceImageUrl: diagram.file_url,
+      targetFaceUrl,
+      targetFaceSource,
       characterDiagramId: dto.characterDiagramId,
+      referenceKitId: dto.referenceKitId,
       loraId: dto.loraId,
-      loraWeightsUrl: loraData.weightsUrl,
-      loraTriggerWord: loraData.triggerWord,
+      loraWeightsUrl: lora.weights_url,
+      loraTriggerWord: lora.trigger_word,
       durationSeconds,
-      swapMethod,
-      resolution,
-      videoQuality: dto.videoQuality,
-      useTurbo: dto.useTurbo,
-      inferenceSteps: dto.inferenceSteps,
+      videoModel: dto.videoModel,
+      keepOriginalOutfit: dto.keepOriginalOutfit,
+      upscaleMethod: dto.upscaleMethod,
+      upscaleResolution: dto.upscaleResolution || '2k',
+      keyFrameCount: dto.keyFrameCount,
     });
 
     // Update job status to queued
     await this.jobsService.updateJob(job.id, { status: 'queued' });
 
-    this.logger.log(`Face swap job queued: ${job.id}`);
+    this.logger.log(`Advanced face swap job queued: ${job.id}`);
 
     return {
       jobId: job.id,
       videoId: dto.videoId,
-      characterDiagramId: dto.characterDiagramId,
+      targetFaceSource,
       estimatedCostCents,
     };
+  }
+
+  private calculateCost(options: {
+    videoModel: string;
+    upscaleMethod: string;
+    keyFrameCount: number;
+  }): number {
+    let total = GEMINI_COST; // Base Gemini regeneration cost
+    total += options.keyFrameCount * POSE_DETECTION_COST; // Pose detection per frame
+    total += VIDEO_MODEL_COSTS[options.videoModel] || VIDEO_MODEL_COSTS.kling;
+    total += UPSCALE_COSTS[options.upscaleMethod] || 0;
+    return total;
   }
 
   async getSwapResults(jobId: string): Promise<DbVideo | null> {
@@ -194,20 +240,22 @@ export class SwapService {
     const inputPayload = job.input_payload as {
       videoId?: string;
       videoUrl?: string;
+      targetFaceUrl?: string;
+      targetFaceSource?: 'upload' | 'character_diagram' | 'reference_kit';
       characterDiagramId?: string;
-      faceImageUrl?: string;
+      referenceKitId?: string;
       loraId?: string;
       loraWeightsUrl?: string;
       loraTriggerWord?: string;
       durationSeconds?: number;
-      swapMethod?: 'kling' | 'wan_replace';
-      resolution?: '480p' | '580p' | '720p';
-      videoQuality?: 'low' | 'medium' | 'high' | 'maximum';
-      useTurbo?: boolean;
-      inferenceSteps?: number;
+      videoModel?: 'kling' | 'luma' | 'wan';
+      keepOriginalOutfit?: boolean;
+      upscaleMethod?: 'real-esrgan' | 'clarity' | 'creative' | 'none';
+      upscaleResolution?: '2k' | '4k';
+      keyFrameCount?: number;
     } | null;
 
-    if (!inputPayload?.videoUrl || !inputPayload?.faceImageUrl) {
+    if (!inputPayload?.videoUrl || !inputPayload?.targetFaceUrl) {
       throw new Error('Job is missing required input data for retry');
     }
 
@@ -222,26 +270,27 @@ export class SwapService {
       external_status: null,
     });
 
-    // Re-queue the job with original parameters
-    const jobName = inputPayload.swapMethod === 'kling' ? 'kling-motion' : 'wan-replace';
-    await this.faceSwapQueue.add(jobName, {
+    // Re-queue the advanced swap job
+    await this.faceSwapQueue.add('advanced-swap', {
       jobId: job.id,
       videoId: inputPayload.videoId,
       videoUrl: inputPayload.videoUrl,
-      faceImageUrl: inputPayload.faceImageUrl,
+      targetFaceUrl: inputPayload.targetFaceUrl,
+      targetFaceSource: inputPayload.targetFaceSource,
       characterDiagramId: inputPayload.characterDiagramId,
+      referenceKitId: inputPayload.referenceKitId,
       loraId: inputPayload.loraId,
       loraWeightsUrl: inputPayload.loraWeightsUrl,
       loraTriggerWord: inputPayload.loraTriggerWord,
       durationSeconds: inputPayload.durationSeconds,
-      swapMethod: inputPayload.swapMethod,
-      resolution: inputPayload.resolution,
-      videoQuality: inputPayload.videoQuality,
-      useTurbo: inputPayload.useTurbo,
-      inferenceSteps: inputPayload.inferenceSteps,
+      videoModel: inputPayload.videoModel || 'kling',
+      keepOriginalOutfit: inputPayload.keepOriginalOutfit ?? true,
+      upscaleMethod: inputPayload.upscaleMethod || 'none',
+      upscaleResolution: inputPayload.upscaleResolution || '2k',
+      keyFrameCount: inputPayload.keyFrameCount || 5,
     });
 
-    this.logger.log(`Retried face swap job: ${jobId}`);
+    this.logger.log(`Retried advanced face swap job: ${jobId}`);
     return { jobId };
   }
 
@@ -255,7 +304,6 @@ export class SwapService {
     const outputPayload = job.output_payload as { outputVideoId?: string; outputUrl?: string } | null;
     if (outputPayload?.outputVideoId) {
       try {
-        // Delete the video record (this will also clean up the file via cascade or manually)
         await this.supabase.deleteVideo(outputPayload.outputVideoId);
       } catch (error) {
         this.logger.warn(`Failed to delete output video: ${error}`);

@@ -108,6 +108,22 @@ export interface DbJob {
   completed_at: string | null;
 }
 
+export interface DbReferenceKit {
+  id: string;
+  name: string;
+  source_image_url: string;
+  anchor_face_url: string | null;
+  profile_url: string | null;
+  half_body_url: string | null;
+  full_body_url: string | null;
+  expressions: Record<string, string>;
+  status: 'pending' | 'generating' | 'ready' | 'failed';
+  generation_progress: Record<string, string>;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 @Injectable()
 export class SupabaseService implements OnModuleInit {
   private client!: SupabaseClient;
@@ -169,14 +185,32 @@ export class SupabaseService implements OnModuleInit {
     file: Buffer,
     contentType: string,
   ): Promise<{ url: string }> {
+    const sizeMb = file.length / (1024 * 1024);
+    this.logger.log(`[Upload] Bucket: ${bucket}, Path: ${path}, Size: ${sizeMb.toFixed(2)}MB, Type: ${contentType}`);
+
+    let uploadBuffer = file;
+
+    // Compress video if too large (>45MB to leave margin for 50MB limit)
+    if (contentType.startsWith('video/') && sizeMb > 45) {
+      this.logger.log(`[Upload] Video too large (${sizeMb.toFixed(2)}MB), compressing...`);
+      try {
+        uploadBuffer = await this.compressVideoBuffer(file, 45);
+        const newSizeMb = uploadBuffer.length / (1024 * 1024);
+        this.logger.log(`[Upload] Compressed: ${sizeMb.toFixed(2)}MB -> ${newSizeMb.toFixed(2)}MB`);
+      } catch (compressError) {
+        this.logger.warn(`[Upload] Compression failed, trying original: ${compressError}`);
+      }
+    }
+
     const { error } = await this.client.storage
       .from(bucket)
-      .upload(path, file, {
+      .upload(path, uploadBuffer, {
         contentType,
         upsert: true,
       });
 
     if (error) {
+      this.logger.error(`[Upload] FAILED - Bucket: ${bucket}, Size: ${(uploadBuffer.length / 1024 / 1024).toFixed(2)}MB, Error: ${error.message}`);
       throw new Error(`Failed to upload file: ${error.message}`);
     }
 
@@ -184,7 +218,57 @@ export class SupabaseService implements OnModuleInit {
       .from(bucket)
       .getPublicUrl(path);
 
+    this.logger.log(`[Upload] SUCCESS - ${path}`);
     return { url: urlData.publicUrl };
+  }
+
+  /**
+   * Compress a video buffer using ffmpeg
+   * Writes to temp file, compresses, reads back
+   */
+  private async compressVideoBuffer(input: Buffer, targetSizeMb: number): Promise<Buffer> {
+    const fs = await import('fs/promises');
+    const path = await import('path');
+    const os = await import('os');
+    const { exec } = await import('child_process');
+    const { promisify } = await import('util');
+    const execAsync = promisify(exec);
+
+    // Create temp files
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'video-compress-'));
+    const inputPath = path.join(tempDir, 'input.mp4');
+    const outputPath = path.join(tempDir, 'output.mp4');
+
+    try {
+      // Write input buffer to temp file
+      await fs.writeFile(inputPath, input);
+
+      // Get video duration
+      const { stdout: durationOut } = await execAsync(
+        `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${inputPath}"`,
+      );
+      const duration = parseFloat(durationOut.trim()) || 10;
+
+      // Calculate target bitrate (kbps)
+      const targetBitrate = Math.floor((targetSizeMb * 1024 * 8) / duration);
+      this.logger.log(`[Compress] Duration: ${duration.toFixed(1)}s, Target bitrate: ${targetBitrate}kbps`);
+
+      // Compress with ffmpeg
+      await execAsync(
+        `ffmpeg -y -i "${inputPath}" -c:v libx264 -b:v ${targetBitrate}k -maxrate ${Math.floor(targetBitrate * 1.5)}k -bufsize ${targetBitrate * 2}k -c:a aac -b:a 128k -movflags +faststart "${outputPath}"`,
+      );
+
+      // Read compressed file back to buffer
+      const compressedBuffer = await fs.readFile(outputPath);
+      return compressedBuffer;
+    } finally {
+      // Cleanup temp directory
+      try {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
   }
 
   async getSignedUrl(
@@ -843,5 +927,71 @@ export class SupabaseService implements OnModuleInit {
       .eq('id', id);
 
     if (error) throw new Error(`Failed to delete image collection item: ${error.message}`);
+  }
+
+  // ============================================
+  // DATABASE OPERATIONS - REFERENCE KITS
+  // ============================================
+
+  async createReferenceKit(
+    kit: Omit<DbReferenceKit, 'id' | 'created_at' | 'updated_at'>,
+  ): Promise<DbReferenceKit> {
+    const { data, error } = await this.client
+      .from('reference_kits')
+      .insert(kit)
+      .select()
+      .single();
+
+    if (error) throw new Error(`Failed to create reference kit: ${error.message}`);
+    return data;
+  }
+
+  async getReferenceKit(id: string): Promise<DbReferenceKit | null> {
+    const { data, error } = await this.client
+      .from('reference_kits')
+      .select()
+      .eq('id', id)
+      .single();
+
+    if (error && error.code !== 'PGRST116') {
+      throw new Error(`Failed to get reference kit: ${error.message}`);
+    }
+    return data;
+  }
+
+  async updateReferenceKit(id: string, update: Partial<DbReferenceKit>): Promise<DbReferenceKit> {
+    const { data, error } = await this.client
+      .from('reference_kits')
+      .update(update)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw new Error(`Failed to update reference kit: ${error.message}`);
+    return data;
+  }
+
+  async listReferenceKits(status?: string): Promise<DbReferenceKit[]> {
+    let query = this.client
+      .from('reference_kits')
+      .select()
+      .order('created_at', { ascending: false });
+
+    if (status) {
+      query = query.eq('status', status);
+    }
+
+    const { data, error } = await query;
+    if (error) throw new Error(`Failed to list reference kits: ${error.message}`);
+    return data || [];
+  }
+
+  async deleteReferenceKit(id: string): Promise<void> {
+    const { error } = await this.client
+      .from('reference_kits')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw new Error(`Failed to delete reference kit: ${error.message}`);
   }
 }

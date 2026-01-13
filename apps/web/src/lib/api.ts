@@ -635,21 +635,27 @@ export interface FaceSwapResult {
   success: boolean;
   jobId: string;
   videoId: string;
-  characterDiagramId: string;
+  targetFaceSource: 'upload' | 'character_diagram' | 'reference_kit';
   estimatedCostCents: number;
 }
 
 export interface CreateFaceSwapRequest {
   videoId: string;
-  characterDiagramId: string;
-  loraId?: string; // Optional - identity comes from character diagram
-  // Swap method selection
-  swapMethod?: 'kling' | 'wan_replace';
-  // WAN Animate Replace settings (only used for wan_replace)
-  resolution?: '480p' | '580p' | '720p';
-  videoQuality?: 'low' | 'medium' | 'high' | 'maximum';
-  useTurbo?: boolean;
-  inferenceSteps?: number;
+  // Target face - at least one required
+  uploadedFaceUrl?: string;
+  characterDiagramId?: string;
+  referenceKitId?: string;
+  // LoRA model - REQUIRED for advanced pipeline
+  loraId: string;
+  // Video generation model
+  videoModel: 'kling' | 'luma' | 'wan';
+  // Processing options
+  keepOriginalOutfit: boolean;
+  // Upscaling options
+  upscaleMethod: 'real-esrgan' | 'clarity' | 'creative' | 'none';
+  upscaleResolution?: '2k' | '4k';
+  // Key frame count (5-10)
+  keyFrameCount: number;
 }
 
 export const swapApi = {
@@ -693,6 +699,7 @@ export interface ImageGenerationResult {
 export interface CreateImageGenerationRequest {
   loraId?: string;
   characterDiagramId?: string;
+  referenceKitId?: string;
   prompt?: string;
   sourceImageUrl?: string;
   aspectRatio?: '1:1' | '16:9' | '9:16' | '4:5' | '3:4';
@@ -942,5 +949,59 @@ export const imageCollectionsApi = {
   removeImage: (collectionId: string, itemId: string) =>
     fetchApi<{ success: boolean }>(`/image-collections/${collectionId}/images/${itemId}`, {
       method: 'DELETE',
+    }),
+};
+
+// ==================== Reference Kit API ====================
+
+export interface ReferenceKit {
+  id: string;
+  name: string;
+  source_image_url: string;
+  anchor_face_url: string | null;
+  profile_url: string | null;
+  half_body_url: string | null;
+  full_body_url: string | null;
+  expressions: Record<string, string>;
+  status: 'pending' | 'generating' | 'ready' | 'failed';
+  generation_progress: Record<string, string>;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateReferenceKitRequest {
+  name: string;
+  sourceImageUrl: string;
+  generateExtended?: boolean;
+  expressions?: string[];
+}
+
+export const referenceKitApi = {
+  list: (status?: string) =>
+    fetchApiSilent<ReferenceKit[]>(`/reference-kits${status ? `?status=${status}` : ''}`, []),
+
+  get: (id: string) => fetchApi<ReferenceKit>(`/reference-kits/${id}`),
+
+  create: (data: CreateReferenceKitRequest) =>
+    fetchApi<ReferenceKit>('/reference-kits', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  update: (id: string, data: { name: string }) =>
+    fetchApi<ReferenceKit>(`/reference-kits/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+
+  delete: (id: string) =>
+    fetchApi<{ success: boolean }>(`/reference-kits/${id}`, {
+      method: 'DELETE',
+    }),
+
+  regenerate: (id: string, type: string) =>
+    fetchApi<ReferenceKit>(`/reference-kits/${id}/regenerate/${type}`, {
+      method: 'POST',
     }),
 };

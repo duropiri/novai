@@ -1180,4 +1180,394 @@ export class FalService implements OnModuleInit {
 
     throw new Error(`Face swap timed out after ${maxAttempts} attempts`);
   }
+
+  // ============================================
+  // VIDEO GENERATION MODELS FOR NANO KLING
+  // ============================================
+
+  /**
+   * Run WAN v2.2 video generation with motion control
+   * Fast option for video generation from regenerated frame
+   */
+  async runWanVideoGeneration(input: {
+    image_url: string; // Regenerated frame
+    video_url: string; // Motion reference video
+    resolution?: '480p' | '580p' | '720p';
+    onProgress?: (status: { status: string; logs?: Array<{ message: string }> }) => void;
+  }): Promise<{ video: { url: string; file_name: string; content_type: string; file_size: number } }> {
+    this.logger.log('Running WAN v2.2 video generation via fal.ai client');
+    this.logger.log(`Input: image_url=${input.image_url.substring(0, 50)}..., video_url=${input.video_url.substring(0, 50)}...`);
+
+    try {
+      const result = await fal.subscribe('fal-ai/wan/v2.2-14b/animate/replace', {
+        input: {
+          image_url: input.image_url,
+          video_url: input.video_url,
+          resolution: input.resolution ?? '720p',
+        },
+        logs: true,
+        onQueueUpdate: (update) => {
+          this.logger.log(`WAN queue status: ${update.status}`);
+          if (input.onProgress) {
+            input.onProgress({
+              status: update.status,
+              logs: 'logs' in update ? update.logs : undefined,
+            });
+          }
+        },
+      });
+
+      this.logger.log('WAN video generation completed');
+
+      // Type assertion for the result
+      const typedResult = result.data as { video: { url: string; file_name: string; content_type: string; file_size: number } };
+
+      if (!typedResult?.video?.url) {
+        throw new Error('WAN returned no video URL');
+      }
+
+      return typedResult;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`WAN video generation failed: ${message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Run Sora-style premium video generation
+   * Uses Luma Dream Machine as a premium alternative (highest quality)
+   * Note: When OpenAI Sora API becomes available, this can be updated
+   */
+  async runSoraVideoGeneration(input: {
+    image_url: string; // Regenerated frame
+    video_url: string; // Motion reference video (for prompt extraction)
+    prompt?: string; // Optional custom prompt
+    onProgress?: (status: { status: string; logs?: Array<{ message: string }> }) => void;
+  }): Promise<{ video: { url: string; file_name: string; content_type: string; file_size: number } }> {
+    this.logger.log('Running premium video generation (Luma Dream Machine) via fal.ai client');
+    this.logger.log(`Input: image_url=${input.image_url.substring(0, 50)}...`);
+
+    try {
+      // Use Luma Dream Machine for premium quality image-to-video
+      // This provides cinematic quality similar to Sora
+      const result = await fal.subscribe('fal-ai/luma-dream-machine/image-to-video', {
+        input: {
+          image_url: input.image_url,
+          prompt: input.prompt || 'Continue this scene naturally with smooth, cinematic motion. Maintain the exact appearance of the person.',
+          aspect_ratio: '9:16', // Portrait for social content
+          loop: false,
+        },
+        logs: true,
+        onQueueUpdate: (update) => {
+          this.logger.log(`Luma queue status: ${update.status}`);
+          if (input.onProgress) {
+            input.onProgress({
+              status: update.status,
+              logs: 'logs' in update ? update.logs : undefined,
+            });
+          }
+        },
+      });
+
+      this.logger.log('Luma video generation completed');
+
+      // Type assertion for the result
+      const typedResult = result.data as { video: { url: string; file_name?: string; content_type?: string; file_size?: number } };
+
+      if (!typedResult?.video?.url) {
+        throw new Error('Luma returned no video URL');
+      }
+
+      // Normalize the result format
+      return {
+        video: {
+          url: typedResult.video.url,
+          file_name: typedResult.video.file_name || 'video.mp4',
+          content_type: typedResult.video.content_type || 'video/mp4',
+          file_size: typedResult.video.file_size || 0,
+        },
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Premium video generation failed: ${message}`);
+      throw error;
+    }
+  }
+
+  // ==================== POSE DETECTION ====================
+
+  /**
+   * Run DWPose for skeleton detection
+   * Returns pose data and skeleton visualization image
+   */
+  async runDWPose(input: {
+    image_url: string;
+  }): Promise<{
+    image: { url: string };
+    poses: Array<{
+      body: Array<{ x: number; y: number; score: number }>;
+      face?: Array<{ x: number; y: number; score: number }>;
+      hands?: Array<{ x: number; y: number; score: number }>;
+    }>;
+  }> {
+    this.logger.log('Running DWPose skeleton detection');
+
+    try {
+      const result = await fal.subscribe('fal-ai/dwpose', {
+        input: {
+          image_url: input.image_url,
+        },
+        logs: true,
+      });
+
+      this.logger.log('DWPose detection completed');
+
+      const typedResult = result.data as {
+        image: { url: string };
+        poses?: Array<{
+          body: Array<{ x: number; y: number; score: number }>;
+          face?: Array<{ x: number; y: number; score: number }>;
+          hands?: Array<{ x: number; y: number; score: number }>;
+        }>;
+      };
+
+      return {
+        image: typedResult.image,
+        poses: typedResult.poses || [],
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`DWPose detection failed: ${message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Run full pose detection using DWPose only
+   * DWPose includes body, face, and hand keypoints in one call
+   * Face detection endpoint doesn't exist on fal.ai, so we use DWPose for everything
+   */
+  async runFullPoseDetection(input: {
+    image_url: string;
+  }): Promise<{
+    skeleton_url: string;
+    body: {
+      keypoints: Array<{ x: number; y: number; score: number }>;
+    } | null;
+    face: {
+      bbox: [number, number, number, number];
+      landmarks: Array<{ x: number; y: number }>;
+      mouth_open: number;
+      eye_aspect_ratio: number;
+    } | null;
+    hands: Array<{ x: number; y: number; score: number }> | null;
+  }> {
+    this.logger.log('Running full pose detection with DWPose');
+
+    // DWPose gives us body + face + hands in one call
+    const poseResult = await this.runDWPose({ image_url: input.image_url });
+    const bodyPose = poseResult.poses?.[0];
+
+    // DWPose skeleton image includes face visualization
+    // We don't have separate face landmarks, but the skeleton is sufficient for motion tracking
+    return {
+      skeleton_url: poseResult.image.url,
+      body: bodyPose
+        ? {
+            keypoints: bodyPose.body || [],
+          }
+        : null,
+      // Face detection not available - return null
+      // The skeleton image still includes face visualization from DWPose
+      face: null,
+      hands: bodyPose?.hands || null,
+    };
+  }
+
+  /**
+   * Describe facial expression from landmarks for prompt generation
+   */
+  describeFacialExpression(face: {
+    mouth_open?: number;
+    eye_aspect_ratio?: number;
+    landmarks?: Array<{ x: number; y: number }>;
+  }): string {
+    const descriptions: string[] = [];
+
+    if (face.mouth_open && face.mouth_open > 0.3) {
+      if (face.mouth_open > 0.6) {
+        descriptions.push('mouth wide open');
+      } else {
+        descriptions.push('mouth slightly open');
+      }
+    } else {
+      descriptions.push('mouth closed');
+    }
+
+    if (face.eye_aspect_ratio) {
+      if (face.eye_aspect_ratio < 0.15) {
+        descriptions.push('eyes closed or squinting');
+      } else if (face.eye_aspect_ratio > 0.35) {
+        descriptions.push('eyes wide open');
+      }
+    }
+
+    return descriptions.length > 0 ? descriptions.join(', ') : 'neutral expression';
+  }
+
+  // ==================== UPSCALING ====================
+
+  /**
+   * Run Real-ESRGAN for fast image upscaling
+   * Good for general purpose upscaling with optional face enhancement
+   */
+  async runRealEsrgan(input: {
+    image_url: string;
+    scale?: 2 | 4;
+    face_enhance?: boolean;
+  }): Promise<{ image: { url: string; width: number; height: number } }> {
+    this.logger.log(`Running Real-ESRGAN upscaling (scale: ${input.scale || 4}x)`);
+
+    try {
+      const result = await fal.subscribe('fal-ai/real-esrgan', {
+        input: {
+          image_url: input.image_url,
+          scale: input.scale ?? 4,
+          face_enhance: input.face_enhance ?? true,
+        },
+        logs: true,
+      });
+
+      this.logger.log('Real-ESRGAN upscaling completed');
+
+      const typedResult = result.data as {
+        image: { url: string; width: number; height: number };
+      };
+
+      return typedResult;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Real-ESRGAN upscaling failed: ${message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Run Clarity Upscaler (Topaz-style quality upscaling)
+   * Better quality than Real-ESRGAN but slower
+   */
+  async runClarityUpscaler(input: {
+    image_url: string;
+    scale_factor?: number; // 1-4
+    creativity?: number; // 0-1, lower = more faithful
+    resemblance?: number; // 0-1, higher = more similar
+    prompt?: string;
+  }): Promise<{ image: { url: string } }> {
+    this.logger.log(`Running Clarity upscaler (scale: ${input.scale_factor || 2}x)`);
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await (fal.subscribe as any)('fal-ai/clarity-upscaler', {
+        input: {
+          image_url: input.image_url,
+          upscale_factor: input.scale_factor ?? 2,
+          creativity: input.creativity ?? 0.2, // Low for faithful upscale
+          prompt: input.prompt,
+        },
+        logs: true,
+      });
+
+      this.logger.log('Clarity upscaling completed');
+
+      const typedResult = result.data as { image: { url: string } };
+
+      return typedResult;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Clarity upscaling failed: ${message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Run Creative Upscaler (AI-enhanced upscaling with detail generation)
+   * Adds AI-generated details for best visual quality
+   */
+  async runCreativeUpscaler(input: {
+    image_url: string;
+    scale?: 2 | 4;
+    creativity?: number; // 0-1, higher = more AI enhancement
+    detail?: number; // 0-1, higher = more detail
+    resemblance?: number; // 0-1, higher = more similar to original
+  }): Promise<{ image: { url: string } }> {
+    this.logger.log(`Running Creative upscaler (scale: ${input.scale || 2}x)`);
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await (fal.subscribe as any)('fal-ai/creative-upscaler', {
+        input: {
+          image_url: input.image_url,
+          scale: input.scale ?? 2,
+          creativity: input.creativity ?? 0.5,
+          detail: input.detail ?? 1.0,
+        },
+        logs: true,
+      });
+
+      this.logger.log('Creative upscaling completed');
+
+      const typedResult = result.data as { image: { url: string } };
+
+      return typedResult;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Creative upscaling failed: ${message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Upscale an image using the specified method
+   * Convenience method that routes to the appropriate upscaler
+   */
+  async upscaleImage(
+    imageUrl: string,
+    method: 'real-esrgan' | 'clarity' | 'creative',
+    resolution: '2k' | '4k' = '2k',
+  ): Promise<{ url: string }> {
+    const scale = resolution === '4k' ? 4 : 2;
+
+    switch (method) {
+      case 'real-esrgan':
+        const esrganResult = await this.runRealEsrgan({
+          image_url: imageUrl,
+          scale: scale as 2 | 4,
+          face_enhance: true,
+        });
+        return { url: esrganResult.image.url };
+
+      case 'clarity':
+        const clarityResult = await this.runClarityUpscaler({
+          image_url: imageUrl,
+          scale_factor: scale,
+          creativity: 0.2,
+          resemblance: 0.9,
+        });
+        return { url: clarityResult.image.url };
+
+      case 'creative':
+        const creativeResult = await this.runCreativeUpscaler({
+          image_url: imageUrl,
+          scale: scale as 2 | 4,
+          creativity: 0.5,
+          detail: 1.0,
+          resemblance: 0.8,
+        });
+        return { url: creativeResult.image.url };
+
+      default:
+        throw new Error(`Unknown upscale method: ${method}`);
+    }
+  }
 }

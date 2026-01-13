@@ -181,6 +181,249 @@ Maintain a neutral, accurate, reference-grade presentation suitable for face-swa
   }
 
   /**
+   * Generate a reference image for a Reference Kit
+   * Uses the same image-to-image approach as character diagrams
+   */
+  async generateReferenceImage(
+    sourceImageUrl: string,
+    prompt: string,
+  ): Promise<CharacterDiagramResult> {
+    if (!this.ai) {
+      throw new Error('Gemini API not configured');
+    }
+
+    this.logger.log('Generating reference image with Gemini');
+
+    // Download the source image and convert to base64
+    const imageData = await this.downloadImageAsBase64(sourceImageUrl);
+
+    const config: GenerateContentConfig = {
+      responseModalities: ['IMAGE', 'TEXT'],
+      imageConfig: {
+        aspectRatio: '9:16', // Portrait orientation for reference kit
+        imageSize: '1K',     // 1K resolution (keeps file size under Supabase limits)
+      },
+    };
+
+    const contents = [
+      {
+        role: 'user',
+        parts: [
+          { text: prompt },
+          {
+            inlineData: {
+              mimeType: imageData.mimeType,
+              data: imageData.base64,
+            },
+          },
+        ],
+      },
+    ];
+
+    this.logger.log('Calling Gemini API for reference image...');
+
+    const response = await this.ai.models.generateContentStream({
+      model: this.model,
+      config,
+      contents,
+    });
+
+    // Collect the streamed response
+    let imageBase64: string | null = null;
+    let imageMimeType: string | null = null;
+
+    for await (const chunk of response) {
+      if (!chunk.candidates || !chunk.candidates[0]?.content?.parts) {
+        continue;
+      }
+
+      const part = chunk.candidates[0].content.parts[0];
+      if (part && 'inlineData' in part && part.inlineData) {
+        imageBase64 = part.inlineData.data || null;
+        imageMimeType = part.inlineData.mimeType || null;
+        this.logger.log('Reference image received from Gemini');
+        break;
+      } else if (part && 'text' in part) {
+        this.logger.debug(`Gemini text response: ${part.text}`);
+      }
+    }
+
+    if (!imageBase64 || !imageMimeType) {
+      throw new Error('No image generated in Gemini response');
+    }
+
+    this.logger.log('Reference image generated successfully');
+
+    return {
+      imageBase64,
+      mimeType: imageMimeType,
+    };
+  }
+
+  /**
+   * Regenerate a video frame with a new identity from reference images.
+   * Used for AI video swapping - recreates the scene with the identity from references.
+   *
+   * @param firstFrameUrl - The scene/frame to recreate
+   * @param referenceImageUrls - Identity reference images
+   * @param keepOriginalOutfit - Whether to keep the scene's outfit or use identity's
+   * @param expressionHint - Optional facial expression guidance (e.g., "mouth slightly open, eyes wide")
+   */
+  async regenerateFrameWithIdentity(
+    firstFrameUrl: string,
+    referenceImageUrls: string[],
+    keepOriginalOutfit: boolean = true,
+    expressionHint?: string,
+  ): Promise<CharacterDiagramResult> {
+    if (!this.ai) {
+      throw new Error('Gemini API not configured');
+    }
+
+    this.logger.log(`Regenerating frame with identity (${referenceImageUrls.length} references, keepOutfit: ${keepOriginalOutfit}, expression: ${expressionHint || 'none'})`);
+
+    // Build expression instruction if provided
+    const expressionInstruction = expressionHint
+      ? `- FACIAL EXPRESSION: The person should have the following expression: ${expressionHint}. Match this expression exactly.
+`
+      : '';
+
+    // Build the prompt based on outfit preference
+    const prompt = keepOriginalOutfit
+      ? `Generate a new photorealistic image based on the following task:
+
+IDENTITY SWAP: Recreate the scene from the first image, but replace the person with the identity shown in the reference images.
+
+REQUIREMENTS:
+- Copy the person's IDENTITY from the reference images (face, skin tone, hair color, body type)
+- Keep the EXACT same pose, camera angle, background, lighting, and CLOTHING from the scene image
+- The outfit/clothing must remain IDENTICAL to the scene - do not change it
+${expressionInstruction}- Match the composition, framing, and style of the original scene exactly
+- Preserve all background elements and environment details
+
+The first image is the SCENE to recreate. The remaining images are IDENTITY REFERENCES showing the target person.
+
+Generate a single photorealistic image showing the result.`
+      : `Generate a new photorealistic image based on the following task:
+
+IDENTITY SWAP: Recreate the scene from the first image with the person shown in the reference images.
+
+REQUIREMENTS:
+- Replace the person completely (face, body, AND outfit) with the identity from reference images
+- Keep the EXACT same pose, camera angle, background, and lighting from the scene
+${expressionInstruction}- The person should wear clothing consistent with their style in the reference images
+- Match the composition and framing of the original scene exactly
+- Preserve all background elements and environment details
+
+The first image is the SCENE to recreate (use for pose/background). The remaining images are IDENTITY REFERENCES.
+
+Generate a single photorealistic image showing the result.`;
+
+    // Download all images
+    const firstFrameData = await this.downloadImageAsBase64(firstFrameUrl);
+    const referenceImagesData = await Promise.all(
+      referenceImageUrls.map((url) => this.downloadImageAsBase64(url)),
+    );
+
+    // Build content parts: prompt + scene image + all reference images
+    const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [
+      { text: prompt },
+      {
+        inlineData: {
+          mimeType: firstFrameData.mimeType,
+          data: firstFrameData.base64,
+        },
+      },
+    ];
+
+    // Add all reference images
+    for (const refData of referenceImagesData) {
+      parts.push({
+        inlineData: {
+          mimeType: refData.mimeType,
+          data: refData.base64,
+        },
+      });
+    }
+
+    const config: GenerateContentConfig = {
+      responseModalities: ['IMAGE', 'TEXT'],
+      imageConfig: {
+        aspectRatio: '9:16', // Portrait for video
+        imageSize: '2K',
+      },
+    };
+
+    const contents = [
+      {
+        role: 'user',
+        parts,
+      },
+    ];
+
+    this.logger.log('Calling Nano Banana Pro (Gemini) for frame regeneration - NO FALLBACKS...');
+
+    const response = await this.ai.models.generateContentStream({
+      model: this.model,
+      config,
+      contents,
+    });
+
+    // Collect the streamed response
+    let imageBase64: string | null = null;
+    let imageMimeType: string | null = null;
+    const textResponses: string[] = [];
+    let blockedBySafety = false;
+    let finishReason: string | null = null;
+
+    for await (const chunk of response) {
+      // Check for safety blocking
+      const candidate = chunk.candidates?.[0];
+      if (candidate?.finishReason) {
+        finishReason = candidate.finishReason;
+        if (finishReason === 'SAFETY' || finishReason === 'IMAGE_SAFETY') {
+          blockedBySafety = true;
+          this.logger.warn(`Nano Banana Pro: Content blocked by safety filter (${finishReason})`);
+        }
+      }
+
+      if (!candidate?.content?.parts) {
+        this.logger.debug(`Gemini chunk without parts: ${JSON.stringify(chunk)}`);
+        continue;
+      }
+
+      // Check all parts, not just the first one
+      for (const part of candidate.content.parts) {
+        if (part && 'inlineData' in part && part.inlineData) {
+          imageBase64 = part.inlineData.data || null;
+          imageMimeType = part.inlineData.mimeType || null;
+          this.logger.log('Regenerated frame received from Gemini');
+        } else if (part && 'text' in part && part.text) {
+          textResponses.push(part.text);
+          this.logger.log(`Gemini text response: ${part.text}`);
+        }
+      }
+    }
+
+    // Check for safety block - DO NOT FALLBACK, throw error
+    if (blockedBySafety) {
+      throw new Error(`Nano Banana Pro: Image blocked by safety filter (${finishReason})`);
+    }
+
+    if (!imageBase64 || !imageMimeType) {
+      const textSummary = textResponses.join(' ').slice(0, 500);
+      this.logger.error(`Nano Banana Pro did not return an image. Text response: ${textSummary}`);
+      throw new Error(`Nano Banana Pro: No image generated. Response: ${textSummary || 'No response'}`);
+    }
+
+    this.logger.log('Frame regeneration completed successfully');
+
+    return {
+      imageBase64,
+      mimeType: imageMimeType,
+    };
+  }
+
+  /**
    * Download an image and convert to base64
    */
   private async downloadImageAsBase64(
