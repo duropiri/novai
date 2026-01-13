@@ -339,9 +339,12 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
         setTimeout(() => reject(new JobTimeoutError(videoTimeoutMs)), videoTimeoutMs);
       });
 
+      // Track the actual model being called (may differ from selection if using placeholder)
+      let actualModelUsed = videoModel;
+
       // Progress callback for fal.ai status updates
       const onFalProgress = async (status: { status: string; logs?: Array<{ message: string }> }) => {
-        await this.addLog(jobId, `[${videoModel.toUpperCase()}] Status: ${status.status}`);
+        await this.addLog(jobId, `[${actualModelUsed.toUpperCase()}] Status: ${status.status}`);
         if (status.logs?.length) {
           for (const log of status.logs.slice(-2)) {
             await this.addLog(jobId, `[fal.ai] ${log.message}`);
@@ -351,6 +354,7 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
 
       switch (videoModel) {
         case 'wan':
+          actualModelUsed = 'wan';
           await this.addLog(jobId, `Starting WAN v2.2 video generation...`);
           videoResult = await Promise.race([
             this.falService.runWanVideoGeneration({
@@ -363,7 +367,7 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
           ]);
           break;
         case 'luma':
-          // Luma Dream Machine (premium quality)
+          actualModelUsed = 'luma';
           await this.addLog(jobId, `Starting Luma Dream Machine video generation...`);
           videoResult = await Promise.race([
             this.falService.runSoraVideoGeneration({
@@ -375,8 +379,9 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
           ]);
           break;
         case 'sora2pro':
-          // Sora 2 Pro (OpenAI's premium model)
-          await this.addLog(jobId, `Starting Sora 2 Pro video generation...`);
+          // Sora 2 Pro currently uses Luma as placeholder (OpenAI Sora API not yet available)
+          actualModelUsed = 'luma';
+          await this.addLog(jobId, `Starting Sora 2 Pro video generation (via Luma placeholder)...`);
           videoResult = await Promise.race([
             this.falService.runSora2ProVideoGeneration({
               image_url: primaryFrameUrl,
@@ -388,6 +393,7 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
           break;
         case 'kling':
         default:
+          actualModelUsed = 'kling';
           await this.addLog(jobId, `Starting Kling v2.6 motion control...`);
           videoResult = await Promise.race([
             this.falService.runKlingMotionControl({
@@ -400,6 +406,16 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
           ]);
           break;
       }
+
+      // Update output_payload with the actual model used
+      const jobAfterGen = await this.supabase.getJob(jobId);
+      const payloadAfterGen = (jobAfterGen?.output_payload as Record<string, unknown>) || {};
+      await this.supabase.updateJob(jobId, {
+        output_payload: {
+          ...payloadAfterGen,
+          actualModelUsed,
+        },
+      });
 
       if (!videoResult.video?.url) {
         throw new Error(`${videoModel.toUpperCase()} returned no video URL`);

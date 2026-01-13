@@ -720,6 +720,7 @@ export default function AISwapperPage() {
               {recentJobs.map((job) => {
                 const outputPayload = job.output_payload as {
                   videoModel?: string;
+                  actualModelUsed?: string;
                   loraId?: string;
                   loraTriggerWord?: string;
                   targetFaceSource?: string;
@@ -730,14 +731,14 @@ export default function AISwapperPage() {
                   logs?: string[];
                 } | null;
                 const firstFrameSkipped = outputPayload?.first_frame_skipped;
-                const videoModel = outputPayload?.videoModel;
+                // Use actualModelUsed (what was really called) over videoModel (what was selected)
+                const actualModel = outputPayload?.actualModelUsed || outputPayload?.videoModel;
                 const logs = outputPayload?.logs || [];
 
                 // Model display name mapping
                 const modelDisplayNames: Record<string, string> = {
                   kling: 'Kling',
                   luma: 'Luma',
-                  sora2pro: 'Sora 2 Pro',
                   wan: 'WAN',
                 };
 
@@ -755,10 +756,10 @@ export default function AISwapperPage() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         {getJobStatusBadge(job)}
-                        {/* Model Badge - only show if we have the model info */}
-                        {videoModel && (
+                        {/* Model Badge - shows the actual model used */}
+                        {actualModel && (
                           <Badge variant="outline" className="text-xs">
-                            {modelDisplayNames[videoModel] || videoModel}
+                            {modelDisplayNames[actualModel] || actualModel}
                           </Badge>
                         )}
                         {job.progress > 0 && job.progress < 100 && (
