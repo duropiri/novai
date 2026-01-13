@@ -726,6 +726,7 @@ export default function AISwapperPage() {
                   targetFaceSource?: string;
                   upscaleMethod?: string;
                   upscaleResolution?: string;
+                  engineUsed?: 'gemini' | 'local' | 'fal.ai' | 'none';
                   first_frame_skipped?: boolean;
                   skip_reason?: string;
                   logs?: string[];
@@ -733,6 +734,7 @@ export default function AISwapperPage() {
                 const firstFrameSkipped = outputPayload?.first_frame_skipped;
                 const selectedModel = outputPayload?.videoModel;
                 const actualModel = outputPayload?.actualModelUsed;
+                const engineUsed = outputPayload?.engineUsed;
                 const logs = outputPayload?.logs || [];
 
                 // Model display name mapping
@@ -778,6 +780,22 @@ export default function AISwapperPage() {
                         {isJobStuck(job) && (
                           <Badge variant="outline" className="text-yellow-600 border-yellow-500/50 text-xs">
                             Stuck
+                          </Badge>
+                        )}
+                        {/* Engine Used Badge */}
+                        {engineUsed && engineUsed !== 'none' && (
+                          <Badge
+                            className={`text-xs ${
+                              engineUsed === 'gemini'
+                                ? 'bg-blue-100 text-blue-800 border-blue-300'
+                                : engineUsed === 'local'
+                                ? 'bg-purple-100 text-purple-800 border-purple-300'
+                                : 'bg-gray-100 text-gray-800 border-gray-300'
+                            }`}
+                          >
+                            {engineUsed === 'gemini' && 'Gemini'}
+                            {engineUsed === 'local' && 'Local AI'}
+                            {engineUsed === 'fal.ai' && 'fal.ai'}
                           </Badge>
                         )}
                         {/* First Frame Skipped Indicator */}

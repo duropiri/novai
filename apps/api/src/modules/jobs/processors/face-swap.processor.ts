@@ -5,6 +5,7 @@ import { QUEUES } from '../queues.constants';
 import { JobsService } from '../jobs.service';
 import { FalService } from '../../../services/fal.service';
 import { GeminiService } from '../../../services/gemini.service';
+import { LocalAIService } from '../../../services/local-ai.service';
 import { SupabaseService } from '../../files/supabase.service';
 
 /**
@@ -53,6 +54,7 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
     private readonly jobsService: JobsService,
     private readonly falService: FalService,
     private readonly geminiService: GeminiService,
+    private readonly localAIService: LocalAIService,
     private readonly supabase: SupabaseService,
   ) {
     super();
@@ -161,6 +163,7 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
     const startTime = Date.now();
     let firstFrameSkipped = false;
     let skipReason = '';
+    let engineUsed: 'gemini' | 'local' | 'fal.ai' | 'none' = 'none';
 
     try {
       await this.jobsService.markJobProcessing(jobId);
@@ -243,7 +246,8 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
         }
       }
 
-      let primaryFrameUrl: string;
+      // Initialize with first frame as fallback (will be replaced if processing succeeds)
+      let primaryFrameUrl: string = firstFrameUrl;
 
       try {
         // Try Nano Banana Pro (Gemini) - NO FALLBACKS
@@ -268,6 +272,7 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
         );
 
         primaryFrameUrl = regenUrl;
+        engineUsed = 'gemini';
         this.logger.log(`[${jobId}] Stage 2: Gemini regeneration successful`);
         this.logger.log(`[${jobId}] DEBUG - Regenerated frame URL: ${regenUrl}`);
 
@@ -288,7 +293,6 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
         // Nano Banana Pro failed (likely safety filter)
         const errorMsg = geminiError instanceof Error ? geminiError.message : 'Unknown error';
         this.logger.warn(`[${jobId}] Nano Banana Pro failed: ${errorMsg}`);
-        this.logger.warn(`[${jobId}] Skipping first frame generation, proceeding to direct video generation`);
 
         firstFrameSkipped = true;
         skipReason = errorMsg;
@@ -304,26 +308,73 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
           },
         });
 
-        await this.updateProgress(jobId, 25, 'First frame generation skipped (safety filter). Using direct face swap...');
+        // ========================================
+        // FALLBACK 1: Try Local AI (Automatic1111)
+        // ========================================
+        if (this.localAIService.isEnabled()) {
+          await this.updateProgress(jobId, 25, 'Gemini blocked. Trying local AI fallback...');
+          this.logger.log(`[${jobId}] Attempting local AI fallback (Automatic1111)...`);
 
-        // Direct mode: use basic fal.ai face swap on original first frame
-        this.logger.log(`[${jobId}] Using basic face swap fallback...`);
+          const localAvailable = await this.localAIService.isAvailable();
+          if (localAvailable) {
+            try {
+              // Use local face swap with ReActor
+              const localSwapUrl = await this.localAIService.faceSwap({
+                baseImageUrl: firstFrameUrl,
+                faceImageUrl: targetFaceUrl,
+                faceRestorerVisibility: 1,
+              });
 
-        try {
-          const faceSwapResult = await this.falService.runFaceSwap({
-            base_image_url: firstFrameUrl,
-            swap_image_url: targetFaceUrl,
-          });
+              primaryFrameUrl = localSwapUrl;
+              engineUsed = 'local';
+              this.logger.log(`[${jobId}] Local AI face swap successful`);
+              await this.updateProgress(jobId, 40, 'Local AI face swap complete');
 
-          primaryFrameUrl = faceSwapResult.image?.url || firstFrameUrl;
-          this.logger.log(`[${jobId}] Basic face swap complete`);
-        } catch (faceSwapError) {
-          // If even basic face swap fails, use original frame
-          this.logger.warn(`[${jobId}] Basic face swap also failed, using original frame`);
-          primaryFrameUrl = firstFrameUrl;
+              // Update payload with engine info
+              const jobAfterLocal = await this.supabase.getJob(jobId);
+              const payloadAfterLocal = (jobAfterLocal?.output_payload as Record<string, unknown>) || {};
+              await this.supabase.updateJob(jobId, {
+                output_payload: {
+                  ...payloadAfterLocal,
+                  engineUsed: 'local',
+                  localAIUsed: true,
+                },
+              });
+            } catch (localError) {
+              const localErrorMsg = localError instanceof Error ? localError.message : 'Unknown error';
+              this.logger.warn(`[${jobId}] Local AI fallback failed: ${localErrorMsg}`);
+              // Continue to fal.ai fallback
+            }
+          } else {
+            this.logger.warn(`[${jobId}] Local AI enabled but not available`);
+          }
         }
 
-        await this.updateProgress(jobId, 40, 'Direct face swap complete');
+        // ========================================
+        // FALLBACK 2: fal.ai Face Swap
+        // ========================================
+        if (engineUsed === 'none') {
+          await this.updateProgress(jobId, 25, 'Using fal.ai face swap fallback...');
+          this.logger.log(`[${jobId}] Using fal.ai face swap fallback...`);
+
+          try {
+            const faceSwapResult = await this.falService.runFaceSwap({
+              base_image_url: firstFrameUrl,
+              swap_image_url: targetFaceUrl,
+            });
+
+            primaryFrameUrl = faceSwapResult.image?.url || firstFrameUrl;
+            engineUsed = 'fal.ai';
+            this.logger.log(`[${jobId}] fal.ai face swap complete`);
+          } catch (faceSwapError) {
+            // If even basic face swap fails, use original frame
+            this.logger.warn(`[${jobId}] fal.ai face swap also failed, using original frame`);
+            primaryFrameUrl = firstFrameUrl;
+            engineUsed = 'none';
+          }
+
+          await this.updateProgress(jobId, 40, 'Face swap fallback complete');
+        }
       }
 
       // ========================================
@@ -505,7 +556,7 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
         keyFrameCount: 1, // Only processing one frame now
       });
 
-      // Mark job completed with skip info
+      // Mark job completed with skip info and engine used
       this.logger.log(`[${jobId}] === MARKING JOB COMPLETED ===`);
       await this.jobsService.markJobCompleted(
         jobId,
@@ -516,8 +567,10 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
           characterDiagramId,
           referenceKitId,
           videoModel,
+          actualModelUsed,
           upscaleMethod,
           upscaleResolution,
+          engineUsed,
           first_frame_skipped: firstFrameSkipped,
           skip_reason: skipReason || undefined,
           processingTimeMs: Date.now() - startTime,

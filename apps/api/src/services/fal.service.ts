@@ -1,7 +1,6 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { fal } from '@fal-ai/client';
-import OpenAI from 'openai';
 
 // fal.ai API types
 export interface FalLoraTrainingInput {
@@ -1299,11 +1298,19 @@ export class FalService implements OnModuleInit {
   /**
    * Run Sora 2 Pro video generation using OpenAI's Sora API
    * Premium video generation with highest quality and realism
+   *
+   * API Parameters:
+   * - model: 'sora-2' or 'sora-2-pro'
+   * - prompt: string describing the video
+   * - seconds: 4, 8, or 12 (NOT 'duration')
+   * - size: '720x1280' (portrait) or '1280x720' (landscape)
+   * - input_reference: File for image-to-video (requires multipart/form-data)
    */
   async runSora2ProVideoGeneration(input: {
-    image_url: string; // Regenerated frame
-    video_url: string; // Motion reference video (for prompt extraction)
+    image_url: string; // Starting image for image-to-video
+    video_url: string; // Motion reference (unused for Sora, kept for interface compatibility)
     prompt?: string; // Optional custom prompt
+    seconds?: 4 | 8 | 12; // Video duration
     onProgress?: (status: { status: string; logs?: Array<{ message: string }> }) => void;
   }): Promise<{ video: { url: string; file_name: string; content_type: string; file_size: number } }> {
     this.logger.log('Running Sora 2 Pro video generation via OpenAI');
@@ -1314,36 +1321,57 @@ export class FalService implements OnModuleInit {
       throw new Error('OPENAI_API_KEY not configured');
     }
 
-    const openai = new OpenAI({ apiKey: openaiApiKey });
-
     try {
       if (input.onProgress) {
         input.onProgress({ status: 'STARTING', logs: [{ message: 'Initializing OpenAI Sora...' }] });
       }
 
-      // Generate video using OpenAI Sora
       const prompt = input.prompt || 'Continue this scene naturally with smooth, cinematic motion. Maintain the exact appearance of the person. High quality, photorealistic.';
-
       this.logger.log(`Sora prompt: ${prompt}`);
 
       if (input.onProgress) {
-        input.onProgress({ status: 'GENERATING', logs: [{ message: 'Generating video with Sora...' }] });
+        input.onProgress({ status: 'GENERATING', logs: [{ message: 'Downloading reference image...' }] });
       }
 
-      // Use OpenAI's Sora video generation API
-      // API: POST /videos with model, prompt, duration, resolution
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const response = await (openai.videos as any).create({
-        model: 'sora-2-pro',
-        prompt,
-        duration: 5,
-        resolution: '1280x720',
+      // Download the reference image for input_reference
+      const imageBuffer = await this.downloadFileAsBuffer(input.image_url);
+      this.logger.log(`Downloaded image: ${imageBuffer.length} bytes`);
+
+      if (input.onProgress) {
+        input.onProgress({ status: 'GENERATING', logs: [{ message: 'Submitting to Sora API...' }] });
+      }
+
+      // Use FormData for multipart request (required for input_reference)
+      const formData = new FormData();
+      formData.append('model', 'sora-2-pro');
+      formData.append('prompt', prompt);
+      formData.append('seconds', String(input.seconds || 8)); // Allowed: 4, 8, 12
+      formData.append('size', '1280x720'); // Landscape for video content
+
+      // Create a Blob from the buffer for the input_reference
+      // Convert Buffer to Uint8Array for Blob compatibility
+      const imageBlob = new Blob([new Uint8Array(imageBuffer)], { type: 'image/jpeg' });
+      formData.append('input_reference', imageBlob, 'reference.jpg');
+
+      // Submit to OpenAI Sora API
+      const createResponse = await fetch('https://api.openai.com/v1/videos', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${openaiApiKey}`,
+        },
+        body: formData,
       });
 
-      this.logger.log(`Sora job created: ${JSON.stringify(response)}`);
+      if (!createResponse.ok) {
+        const errorText = await createResponse.text();
+        this.logger.error(`Sora API error: ${createResponse.status} - ${errorText}`);
+        throw new Error(`OpenAI Sora API error (${createResponse.status}): ${errorText}`);
+      }
 
-      // Poll for completion - Sora returns a job that needs to be polled
-      const jobId = response?.id;
+      const createResult = await createResponse.json();
+      this.logger.log(`Sora job created: ${JSON.stringify(createResult)}`);
+
+      const jobId = createResult?.id;
       if (!jobId) {
         throw new Error('OpenAI Sora did not return a job ID');
       }
@@ -1353,37 +1381,7 @@ export class FalService implements OnModuleInit {
       }
 
       // Poll for completion
-      let videoUrl: string | undefined;
-      const maxPolls = 120; // 10 minutes at 5 second intervals
-      const pollInterval = 5000;
-
-      for (let i = 0; i < maxPolls; i++) {
-        await new Promise((resolve) => setTimeout(resolve, pollInterval));
-
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const status = await (openai.videos as any).retrieve(jobId);
-        const statusState = status?.status;
-
-        this.logger.log(`Sora job ${jobId} status: ${statusState}`);
-
-        if (input.onProgress) {
-          input.onProgress({ status: statusState || 'POLLING', logs: [{ message: `Poll ${i + 1}: ${statusState}` }] });
-        }
-
-        if (statusState === 'completed') {
-          videoUrl = status?.url || status?.video_url;
-          break;
-        }
-
-        if (statusState === 'failed') {
-          const error = status?.error || 'Unknown error';
-          throw new Error(`OpenAI Sora generation failed: ${error}`);
-        }
-      }
-
-      if (!videoUrl) {
-        throw new Error('OpenAI Sora video generation timed out');
-      }
+      const videoUrl = await this.pollSoraCompletion(openaiApiKey, jobId, input.onProgress);
 
       if (input.onProgress) {
         input.onProgress({ status: 'COMPLETED', logs: [{ message: 'Video generation complete' }] });
@@ -1403,13 +1401,79 @@ export class FalService implements OnModuleInit {
       const message = error instanceof Error ? error.message : 'Unknown error';
       this.logger.error(`Sora 2 Pro video generation failed: ${message}`);
 
-      // Log full error for debugging
       if (error instanceof Error && error.stack) {
         this.logger.error(`Stack: ${error.stack}`);
       }
 
       throw error;
     }
+  }
+
+  /**
+   * Poll OpenAI Sora API for job completion
+   */
+  private async pollSoraCompletion(
+    apiKey: string,
+    videoId: string,
+    onProgress?: (status: { status: string; logs?: Array<{ message: string }> }) => void,
+    maxAttempts = 120, // 10 minutes at 5s intervals
+    intervalMs = 5000,
+  ): Promise<string> {
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+
+      const response = await fetch(`https://api.openai.com/v1/videos/${videoId}`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        this.logger.warn(`Sora poll error: ${response.status} - ${errorText}`);
+        continue; // Keep polling on transient errors
+      }
+
+      const video = await response.json();
+      const progress = video?.progress || 0;
+
+      this.logger.log(`Sora status: ${video?.status}, progress: ${progress}%`);
+
+      if (onProgress) {
+        onProgress({
+          status: video?.status || 'POLLING',
+          logs: [{ message: `Poll ${i + 1}: ${video?.status} (${progress}%)` }],
+        });
+      }
+
+      if (video?.status === 'completed') {
+        // Get the video URL - might be in different fields
+        const videoUrl = video?.url || video?.video_url || video?.output?.url;
+        if (!videoUrl) {
+          throw new Error('Sora completed but no video URL returned');
+        }
+        return videoUrl;
+      }
+
+      if (video?.status === 'failed') {
+        throw new Error(`Sora generation failed: ${video?.error || 'Unknown error'}`);
+      }
+    }
+
+    throw new Error('Sora generation timed out after 10 minutes');
+  }
+
+  /**
+   * Download a file from URL as a Buffer
+   */
+  private async downloadFileAsBuffer(url: string): Promise<Buffer> {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to download file: ${response.statusText}`);
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    return Buffer.from(arrayBuffer);
   }
 
   // ==================== POSE DETECTION ====================
