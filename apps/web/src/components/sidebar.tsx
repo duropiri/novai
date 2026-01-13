@@ -8,6 +8,7 @@ import { statsApi, DashboardStats } from '@/lib/api';
 import {
   LayoutDashboard,
   User,
+  Users,
   Wand2,
   Video,
   Layers,
@@ -29,6 +30,7 @@ const toolsNavigation = [
   { name: 'LoRA Creator', href: '/lora', icon: User },
   { name: 'Image Generator', href: '/image-generator', icon: ImagePlus },
   { name: 'Character Diagrams', href: '/characters', icon: Wand2 },
+  { name: 'Reference Kits', href: '/reference-kits', icon: Users },
   { name: 'AI Swapper', href: '/swap', icon: Video },
   { name: 'Variant Generator', href: '/variants', icon: Layers },
 ];

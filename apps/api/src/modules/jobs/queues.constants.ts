@@ -4,6 +4,7 @@ export const QUEUES = {
   FACE_SWAP: 'face-swap',
   IMAGE_GENERATION: 'image-generation',
   VARIANT: 'variant',
+  REFERENCE_KIT: 'reference-kit',
 } as const;
 
 export type QueueName = (typeof QUEUES)[keyof typeof QUEUES];

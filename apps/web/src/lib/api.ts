@@ -1000,6 +1000,7 @@ export const referenceKitApi = {
       method: 'DELETE',
     }),
 
+  // Regenerate creates a duplicate kit with only the specified image regenerated
   regenerate: (id: string, type: string) =>
     fetchApi<ReferenceKit>(`/reference-kits/${id}/regenerate/${type}`, {
       method: 'POST',

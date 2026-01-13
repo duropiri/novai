@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Loader2, Sparkles, Download, ImageIcon, ExternalLink, Check, Upload, X, User, Trash2 } from 'lucide-react';
+import { Loader2, Sparkles, Download, ImageIcon, ExternalLink, Check, Upload, X, User, Users, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -25,15 +25,17 @@ import { useToast } from '@/components/ui/use-toast';
 import {
   loraApi,
   characterApi,
+  referenceKitApi,
   imageGenApi,
   filesApi,
   type LoraModel,
   type CharacterDiagram,
+  type ReferenceKit,
   type ImageGenerationJob,
   type GeneratedImage,
 } from '@/lib/api';
 
-type IdentitySource = 'lora' | 'character-diagram';
+type IdentitySource = 'lora' | 'character-diagram' | 'reference-kit';
 
 const ASPECT_RATIOS = [
   { value: '1:1', label: '1:1 (Square)' },
@@ -53,6 +55,7 @@ export default function ImageGeneratorPage() {
   const [identitySource, setIdentitySource] = useState<IdentitySource>('lora');
   const [selectedLora, setSelectedLora] = useState<LoraModel | null>(null);
   const [selectedDiagram, setSelectedDiagram] = useState<CharacterDiagram | null>(null);
+  const [selectedReferenceKit, setSelectedReferenceKit] = useState<ReferenceKit | null>(null);
 
   // Form state
   const [prompt, setPrompt] = useState('');
@@ -65,11 +68,13 @@ export default function ImageGeneratorPage() {
   // Data
   const [loras, setLoras] = useState<LoraModel[]>([]);
   const [diagrams, setDiagrams] = useState<CharacterDiagram[]>([]);
+  const [referenceKits, setReferenceKits] = useState<ReferenceKit[]>([]);
   const [recentJobs, setRecentJobs] = useState<ImageGenerationJob[]>([]);
 
   // Loading states
   const [isLoadingLoras, setIsLoadingLoras] = useState(true);
   const [isLoadingDiagrams, setIsLoadingDiagrams] = useState(true);
+  const [isLoadingReferenceKits, setIsLoadingReferenceKits] = useState(true);
   const [isLoadingJobs, setIsLoadingJobs] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
@@ -101,6 +106,17 @@ export default function ImageGeneratorPage() {
     }
   }, []);
 
+  const fetchReferenceKits = useCallback(async () => {
+    try {
+      const data = await referenceKitApi.list('ready');
+      setReferenceKits(data);
+    } catch (error) {
+      console.error('Failed to fetch reference kits:', error);
+    } finally {
+      setIsLoadingReferenceKits(false);
+    }
+  }, []);
+
   const fetchJobs = useCallback(async () => {
     try {
       const data = await imageGenApi.getHistory(20);
@@ -115,19 +131,22 @@ export default function ImageGeneratorPage() {
   useEffect(() => {
     fetchLoras();
     fetchDiagrams();
+    fetchReferenceKits();
     fetchJobs();
 
     // Poll for job updates
     const interval = setInterval(fetchJobs, 5000);
     return () => clearInterval(interval);
-  }, [fetchLoras, fetchDiagrams, fetchJobs]);
+  }, [fetchLoras, fetchDiagrams, fetchReferenceKits, fetchJobs]);
 
   // Calculate estimated cost
   // Flux PuLID (Character Diagram): ~$0.04 per image
+  // Reference Kit (Gemini): ~$0.03 per image
   // LoRA Face swap: ~$0.04 per image
   // LoRA Text-to-image: ~$0.03 per image
   const isPulidOrFaceSwap = sourceImage || identitySource === 'character-diagram';
-  const costPerImage = isPulidOrFaceSwap ? 0.04 : 0.03;
+  const isReferenceKitMode = identitySource === 'reference-kit';
+  const costPerImage = isPulidOrFaceSwap ? 0.04 : isReferenceKitMode ? 0.03 : 0.03;
   const estimatedCost = (numImages * costPerImage).toFixed(2);
 
   // Handle source image upload
@@ -191,6 +210,14 @@ export default function ImageGeneratorPage() {
       });
       return;
     }
+    if (identitySource === 'reference-kit' && !selectedReferenceKit) {
+      toast({
+        title: 'Missing Selection',
+        description: 'Please select a Reference Kit',
+        variant: 'destructive',
+      });
+      return;
+    }
 
     // Text-to-image mode requires prompt (when no source image)
     if (!sourceImage && !prompt.trim()) {
@@ -217,11 +244,13 @@ export default function ImageGeneratorPage() {
       const result = await imageGenApi.create({
         ...(identitySource === 'lora'
           ? { loraId: selectedLora!.id, loraStrength }
-          : { characterDiagramId: selectedDiagram!.id }),
+          : identitySource === 'character-diagram'
+          ? { characterDiagramId: selectedDiagram!.id }
+          : { referenceKitId: selectedReferenceKit!.id }),
         prompt: prompt.trim() || undefined,
         sourceImageUrl,
         // Always pass aspectRatio for character diagram mode or LoRA text-to-image
-        aspectRatio: identitySource === 'character-diagram' || !sourceImageUrl ? aspectRatio : undefined,
+        aspectRatio: identitySource === 'character-diagram' || identitySource === 'reference-kit' || !sourceImageUrl ? aspectRatio : undefined,
         numImages,
         imageStrength: sourceImageUrl ? imageStrength : undefined,
       });
@@ -310,7 +339,8 @@ export default function ImageGeneratorPage() {
   const isFaceSwapMode = !!sourceImage;
   const canGenerate =
     (identitySource === 'lora' && selectedLora && (isFaceSwapMode || prompt.trim())) ||
-    (identitySource === 'character-diagram' && selectedDiagram && (isFaceSwapMode || prompt.trim()));
+    (identitySource === 'character-diagram' && selectedDiagram && (isFaceSwapMode || prompt.trim())) ||
+    (identitySource === 'reference-kit' && selectedReferenceKit && (isFaceSwapMode || prompt.trim()));
   const canGenerateNow = canGenerate && !isGenerating;
 
   return (
@@ -329,17 +359,17 @@ export default function ImageGeneratorPage() {
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-lg">
-                {identitySource === 'lora' ? <Sparkles className="w-5 h-5" /> : <User className="w-5 h-5" />}
+                {identitySource === 'lora' ? <Sparkles className="w-5 h-5" /> : identitySource === 'reference-kit' ? <Users className="w-5 h-5" /> : <User className="w-5 h-5" />}
                 1. Select Identity Source
                 <Badge variant="secondary" className="ml-1">Required</Badge>
-                {(selectedLora || selectedDiagram) && <Badge variant="outline" className="ml-auto">Selected</Badge>}
+                {(selectedLora || selectedDiagram || selectedReferenceKit) && <Badge variant="outline" className="ml-auto">Selected</Badge>}
               </CardTitle>
               <CardDescription>
-                Choose a LoRA model or Character Diagram for face identity
+                Choose an identity source for face generation
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              {/* Toggle between LoRA and Character Diagram */}
+              {/* Toggle between LoRA, Character Diagram, and Reference Kit */}
               <div className="flex gap-2">
                 <Button
                   variant={identitySource === 'lora' ? 'default' : 'outline'}
@@ -348,10 +378,11 @@ export default function ImageGeneratorPage() {
                   onClick={() => {
                     setIdentitySource('lora');
                     setSelectedDiagram(null);
+                    setSelectedReferenceKit(null);
                   }}
                 >
                   <Sparkles className="w-4 h-4 mr-2" />
-                  LoRA Model
+                  LoRA
                 </Button>
                 <Button
                   variant={identitySource === 'character-diagram' ? 'default' : 'outline'}
@@ -360,11 +391,35 @@ export default function ImageGeneratorPage() {
                   onClick={() => {
                     setIdentitySource('character-diagram');
                     setSelectedLora(null);
+                    setSelectedReferenceKit(null);
                   }}
                 >
                   <User className="w-4 h-4 mr-2" />
-                  Character Diagram
+                  Diagram
                 </Button>
+                <Button
+                  variant={identitySource === 'reference-kit' ? 'default' : 'outline'}
+                  size="sm"
+                  className="flex-1"
+                  onClick={() => {
+                    setIdentitySource('reference-kit');
+                    setSelectedLora(null);
+                    setSelectedDiagram(null);
+                  }}
+                >
+                  <Users className="w-4 h-4 mr-2" />
+                  Ref Kit
+                </Button>
+              </div>
+
+              {/* Identity source comparison helper */}
+              <div className="p-3 bg-muted/50 rounded-lg text-xs space-y-1">
+                <p className="font-medium text-muted-foreground">Which should I use?</p>
+                <ul className="text-muted-foreground space-y-0.5">
+                  <li>• <strong>LoRA</strong> — Trained on real photos, highest accuracy (~$5, 1 hour)</li>
+                  <li>• <strong>Diagram</strong> — Single reference image, quick face swaps</li>
+                  <li>• <strong>Ref Kit</strong> — Multi-angle AI references, best for AI characters (~$0.20, instant)</li>
+                </ul>
               </div>
 
               {/* Show appropriate selector based on identity source */}
@@ -419,7 +474,7 @@ export default function ImageGeneratorPage() {
                     </div>
                   )}
                 </>
-              ) : (
+              ) : identitySource === 'character-diagram' ? (
                 // Character Diagram selector
                 <>
                   {isLoadingDiagrams ? (
@@ -470,7 +525,58 @@ export default function ImageGeneratorPage() {
                     </div>
                   )}
                 </>
-              )}
+              ) : identitySource === 'reference-kit' ? (
+                // Reference Kit selector
+                <>
+                  {isLoadingReferenceKits ? (
+                    <div className="flex items-center justify-center py-8">
+                      <Loader2 className="w-6 h-6 animate-spin" />
+                    </div>
+                  ) : referenceKits.length === 0 ? (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <p>No Reference Kits found</p>
+                      <p className="text-sm">Create a Reference Kit first</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-3 gap-2 max-h-48 overflow-y-auto">
+                      {referenceKits.map((kit) => (
+                        <button
+                          key={kit.id}
+                          onClick={() => setSelectedReferenceKit(kit)}
+                          className={`relative aspect-square rounded-md overflow-hidden border-2 transition-all ${
+                            selectedReferenceKit?.id === kit.id
+                              ? 'border-primary ring-2 ring-primary/50'
+                              : 'border-transparent hover:border-muted-foreground/50'
+                          }`}
+                        >
+                          {kit.anchor_face_url || kit.source_image_url ? (
+                            <img
+                              src={kit.anchor_face_url || kit.source_image_url}
+                              alt={kit.name}
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <div className="w-full h-full bg-muted flex items-center justify-center">
+                              <Users className="w-6 h-6 text-muted-foreground" />
+                            </div>
+                          )}
+                          <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-xs p-1 truncate text-center">
+                            {kit.name}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {selectedReferenceKit && (
+                    <div className="p-2 bg-muted rounded-md">
+                      <p className="text-sm font-medium truncate">{selectedReferenceKit.name}</p>
+                      <p className="text-xs text-muted-foreground">
+                        Multi-reference identity preservation (anchor + profile)
+                      </p>
+                    </div>
+                  )}
+                </>
+              ) : null}
             </CardContent>
           </Card>
 

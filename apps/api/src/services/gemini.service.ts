@@ -287,36 +287,46 @@ Maintain a neutral, accurate, reference-grade presentation suitable for face-swa
 `
       : '';
 
+    // Scene preservation instructions - critical for maintaining furniture/props
+    const scenePreservation = `
+SCENE PRESERVATION - CRITICAL:
+- Keep ALL furniture (chairs, stools, tables, beds, couches, etc.)
+- Keep ALL props and objects in the scene
+- Keep the floor/ground surface exactly as shown
+- Keep all wall/background elements
+- If the person is sitting on something, that object MUST remain
+- If the person is holding something, that object MUST remain
+- Do NOT remove, add, or modify any objects in the scene`;
+
     // Build the prompt based on outfit preference
     const prompt = keepOriginalOutfit
-      ? `Generate a new photorealistic image based on the following task:
+      ? `Recreate this EXACT scene with the person from the reference images.
 
-IDENTITY SWAP: Recreate the scene from the first image, but replace the person with the identity shown in the reference images.
+ONLY CHANGE: Replace the person's face and body with the identity from the reference images.
 
-REQUIREMENTS:
-- Copy the person's IDENTITY from the reference images (face, skin tone, hair color, body type)
-- Keep the EXACT same pose, camera angle, background, lighting, and CLOTHING from the scene image
-- The outfit/clothing must remain IDENTICAL to the scene - do not change it
-${expressionInstruction}- Match the composition, framing, and style of the original scene exactly
-- Preserve all background elements and environment details
+PRESERVE EVERYTHING ELSE:
+- Keep the EXACT same pose, camera angle, and framing
+- Keep the EXACT same clothing/outfit on the person
+- Keep the EXACT same background and environment
+- Keep the EXACT same lighting and shadows
+${expressionInstruction}${scenePreservation}
 
-The first image is the SCENE to recreate. The remaining images are IDENTITY REFERENCES showing the target person.
+The first image is the SCENE to recreate. The remaining images show the TARGET IDENTITY.
 
-Generate a single photorealistic image showing the result.`
-      : `Generate a new photorealistic image based on the following task:
+Output: 2K resolution, photorealistic, highest quality.`
+      : `Recreate this EXACT scene with the person from the reference images.
 
-IDENTITY SWAP: Recreate the scene from the first image with the person shown in the reference images.
+CHANGE: Replace the entire person (face, body, outfit) with the identity from the references.
 
-REQUIREMENTS:
-- Replace the person completely (face, body, AND outfit) with the identity from reference images
-- Keep the EXACT same pose, camera angle, background, and lighting from the scene
-${expressionInstruction}- The person should wear clothing consistent with their style in the reference images
-- Match the composition and framing of the original scene exactly
-- Preserve all background elements and environment details
+PRESERVE EVERYTHING ELSE:
+- Keep the EXACT same pose, camera angle, and framing
+- Keep the EXACT same background and environment
+- Keep the EXACT same lighting and shadows
+${expressionInstruction}${scenePreservation}
 
-The first image is the SCENE to recreate (use for pose/background). The remaining images are IDENTITY REFERENCES.
+The first image is the SCENE to recreate (use for pose/background). The remaining images show the TARGET IDENTITY.
 
-Generate a single photorealistic image showing the result.`;
+Output: 2K resolution, photorealistic, highest quality.`;
 
     // Download all images
     const firstFrameData = await this.downloadImageAsBase64(firstFrameUrl);

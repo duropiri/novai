@@ -8,6 +8,7 @@ import { QUEUES } from '../jobs/queues.constants';
 export interface CreateImageGenerationDto {
   loraId?: string;
   characterDiagramId?: string;
+  referenceKitId?: string;
   prompt?: string;
   sourceImageUrl?: string;
   aspectRatio?: '1:1' | '16:9' | '9:16' | '4:5' | '3:4';
@@ -20,8 +21,9 @@ export interface ImageGenerationResult {
   jobId: string;
   loraId?: string;
   characterDiagramId?: string;
+  referenceKitId?: string;
   estimatedCostCents: number;
-  mode: 'text-to-image' | 'face-swap' | 'character-diagram-swap';
+  mode: 'text-to-image' | 'face-swap' | 'character-diagram-swap' | 'reference-kit-swap';
 }
 
 export interface GeneratedImage {
@@ -42,11 +44,43 @@ export class ImageGenerationService {
 
   async createImageGeneration(dto: CreateImageGenerationDto): Promise<ImageGenerationResult> {
     // Determine mode based on identity source
-    let mode: 'text-to-image' | 'face-swap' | 'character-diagram-swap';
+    let mode: 'text-to-image' | 'face-swap' | 'character-diagram-swap' | 'reference-kit-swap';
     let referenceId: string;
     let jobPayload: Record<string, unknown>;
 
-    if (dto.characterDiagramId) {
+    if (dto.referenceKitId) {
+      // Reference Kit mode - uses multiple reference images for identity preservation
+      const kit = await this.supabase.getReferenceKit(dto.referenceKitId);
+      if (!kit) {
+        throw new Error('Reference Kit not found');
+      }
+      if (kit.status !== 'ready' || !kit.anchor_face_url) {
+        throw new Error('Reference Kit is not ready (missing anchor face)');
+      }
+
+      // Collect all reference URLs
+      const referenceUrls = [
+        kit.anchor_face_url,
+        kit.profile_url,
+        kit.half_body_url,
+        kit.full_body_url,
+        ...Object.values(kit.expressions || {}),
+      ].filter(Boolean) as string[];
+
+      mode = 'reference-kit-swap';
+      referenceId = dto.referenceKitId;
+      jobPayload = {
+        referenceKitId: dto.referenceKitId,
+        anchorFaceUrl: kit.anchor_face_url,
+        referenceUrls,
+        prompt: dto.prompt,
+        sourceImageUrl: dto.sourceImageUrl,
+        aspectRatio: dto.aspectRatio,
+        numImages: dto.numImages,
+        imageStrength: dto.imageStrength,
+        mode,
+      };
+    } else if (dto.characterDiagramId) {
       // Character Diagram mode - face swap only
       const diagram = await this.supabase.getCharacterDiagram(dto.characterDiagramId);
       if (!diagram) {
@@ -92,7 +126,7 @@ export class ImageGenerationService {
         mode,
       };
     } else {
-      throw new Error('Either LoRA or Character Diagram is required');
+      throw new Error('LoRA, Character Diagram, or Reference Kit is required');
     }
 
     // Calculate estimated cost:
@@ -105,6 +139,7 @@ export class ImageGenerationService {
     this.logger.log(`Creating image generation job`, {
       loraId: dto.loraId,
       characterDiagramId: dto.characterDiagramId,
+      referenceKitId: dto.referenceKitId,
       mode,
       prompt: dto.prompt?.substring(0, 50),
       sourceImageUrl: dto.sourceImageUrl ? 'provided' : 'none',
@@ -131,6 +166,7 @@ export class ImageGenerationService {
       jobId: job.id,
       loraId: dto.loraId,
       characterDiagramId: dto.characterDiagramId,
+      referenceKitId: dto.referenceKitId,
       estimatedCostCents,
       mode,
     };

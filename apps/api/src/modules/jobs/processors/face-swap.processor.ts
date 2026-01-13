@@ -255,6 +255,19 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
 
         primaryFrameUrl = regenUrl;
         this.logger.log(`[${jobId}] Stage 2: Gemini regeneration successful`);
+        this.logger.log(`[${jobId}] DEBUG - Regenerated frame URL: ${regenUrl}`);
+
+        // Store regenerated frame URL for debugging (check if scene elements preserved)
+        const currentJobForDebug = await this.supabase.getJob(jobId);
+        const existingPayloadForDebug = (currentJobForDebug?.output_payload as Record<string, unknown>) || {};
+        await this.supabase.updateJob(jobId, {
+          output_payload: {
+            ...existingPayloadForDebug,
+            debug_regenerated_frame: regenUrl,
+            debug_original_frame: firstFrameUrl,
+          },
+        });
+
         await this.updateProgress(jobId, 40, 'Frame regeneration complete');
 
       } catch (geminiError) {

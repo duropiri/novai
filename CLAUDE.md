@@ -152,3 +152,10 @@ Does this look right before I proceed?
 ---
 
 *Remember: Simplicity is the ultimate sophistication. When in doubt, do less.*
+
+## Active Technologies
+- TypeScript 5.x, Node.js 20.x + NestJS, Next.js 14 (App Router), BullMQ, Supabase Client, Shadcn/UI (001-reference-kit)
+- Supabase (PostgreSQL + Storage bucket) (001-reference-kit)
+
+## Recent Changes
+- 001-reference-kit: Added TypeScript 5.x, Node.js 20.x + NestJS, Next.js 14 (App Router), BullMQ, Supabase Client, Shadcn/UI

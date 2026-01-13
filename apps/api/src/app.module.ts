@@ -15,6 +15,7 @@ import { VariantsModule } from './modules/variants/variants.module';
 import { StatsModule } from './modules/stats/stats.module';
 import { SettingsModule } from './modules/settings/settings.module';
 import { ImageCollectionsModule } from './modules/image-collections/image-collections.module';
+import { ReferenceKitModule } from './modules/reference-kit/reference-kit.module';
 import { HealthController } from './health.controller';
 
 @Module({
@@ -48,6 +49,7 @@ import { HealthController } from './health.controller';
     StatsModule,
     SettingsModule,
     ImageCollectionsModule,
+    ReferenceKitModule,
   ],
   controllers: [HealthController],
 })

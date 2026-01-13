@@ -10,7 +10,8 @@ VALUES
   ('source-videos', 'source-videos', true, 524288000, ARRAY['video/mp4', 'video/quicktime', 'video/webm']),
   ('processed-videos', 'processed-videos', true, 524288000, ARRAY['video/mp4', 'video/quicktime', 'video/webm']),
   ('variant-videos', 'variant-videos', true, 524288000, ARRAY['video/mp4', 'video/quicktime', 'video/webm']),
-  ('audio', 'audio', true, 104857600, ARRAY['audio/mpeg', 'audio/wav', 'audio/mp3', 'audio/m4a'])
+  ('audio', 'audio', true, 104857600, ARRAY['audio/mpeg', 'audio/wav', 'audio/mp3', 'audio/m4a']),
+  ('reference-kits', 'reference-kits', true, 52428800, ARRAY['image/jpeg', 'image/png', 'image/webp'])
 ON CONFLICT (id) DO NOTHING;
 
 -- Drop existing policies if they exist, then recreate

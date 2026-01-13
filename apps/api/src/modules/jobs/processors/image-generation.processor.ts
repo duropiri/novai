@@ -16,13 +16,17 @@ interface ImageGenerationJobData {
   // Character Diagram mode fields
   characterDiagramId?: string;
   characterDiagramUrl?: string;
+  // Reference Kit mode fields
+  referenceKitId?: string;
+  anchorFaceUrl?: string;
+  referenceUrls?: string[];
   // Common fields
   prompt?: string;
   sourceImageUrl?: string;
   aspectRatio?: '1:1' | '16:9' | '9:16' | '4:5' | '3:4';
   numImages: number;
   imageStrength?: number;
-  mode: 'text-to-image' | 'face-swap' | 'character-diagram-swap';
+  mode: 'text-to-image' | 'face-swap' | 'character-diagram-swap' | 'reference-kit-swap';
 }
 
 @Processor(QUEUES.IMAGE_GENERATION)
@@ -69,6 +73,9 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
       loraStrength,
       characterDiagramId,
       characterDiagramUrl,
+      referenceKitId,
+      anchorFaceUrl,
+      referenceUrls,
       prompt,
       sourceImageUrl,
       aspectRatio,
@@ -83,6 +90,7 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
       this.logger.log(`Processing image generation job ${jobId}`, {
         loraId,
         characterDiagramId,
+        referenceKitId,
         mode,
         prompt: prompt?.substring(0, 50),
         sourceImageUrl: sourceImageUrl ? 'provided' : 'none',
@@ -110,6 +118,40 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
           const swapResult = await this.falService.runFaceSwap({
             base_image_url: sourceImageUrl,    // The image with the scene/pose to keep
             swap_image_url: characterDiagramUrl, // The face to swap in
+          });
+
+          if (swapResult.image) {
+            generatedImages.push({
+              url: swapResult.image.url,
+              width: swapResult.image.width,
+              height: swapResult.image.height,
+            });
+          }
+
+          await this.supabase.updateJob(jobId, {
+            progress: 20 + Math.floor((i + 1) / numImages * 70),
+            external_status: 'SWAPPING_FACE',
+          });
+        }
+
+        result = { images: generatedImages };
+      } else if (mode === 'reference-kit-swap' && anchorFaceUrl && sourceImageUrl) {
+        // Reference Kit face swap mode: swap anchor face into source image
+        this.logger.log(`Reference Kit face swap mode: using fal-ai/face-swap with anchor face`);
+        this.logger.log(`Base image (scene): ${sourceImageUrl}`);
+        this.logger.log(`Swap image (anchor face): ${anchorFaceUrl}`);
+        this.logger.log(`Total reference images available: ${referenceUrls?.length || 1}`);
+
+        await this.supabase.updateJob(jobId, { progress: 20 });
+
+        const generatedImages: Array<{ url: string; width: number; height: number }> = [];
+
+        for (let i = 0; i < numImages; i++) {
+          this.logger.log(`Face swap ${i + 1}/${numImages} using Reference Kit anchor face`);
+
+          const swapResult = await this.falService.runFaceSwap({
+            base_image_url: sourceImageUrl,  // The image with the scene/pose to keep
+            swap_image_url: anchorFaceUrl,   // The anchor face from reference kit
           });
 
           if (swapResult.image) {
@@ -238,7 +280,7 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
 
       // Download and upload images to Supabase storage
       const uploadedImages: Array<{ url: string; width: number; height: number }> = [];
-      const storageId = loraId || characterDiagramId || 'unknown';
+      const storageId = loraId || characterDiagramId || referenceKitId || 'unknown';
 
       for (let i = 0; i < result.images.length; i++) {
         const image = result.images[i];
@@ -285,6 +327,7 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
           mode,
           loraId,
           characterDiagramId,
+          referenceKitId,
           aspectRatio,
           numImages,
           loraStrength,

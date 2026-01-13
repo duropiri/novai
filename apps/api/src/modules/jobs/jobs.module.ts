@@ -7,6 +7,7 @@ import { CharacterProcessor } from './processors/character.processor';
 import { FaceSwapProcessor } from './processors/face-swap.processor';
 import { ImageGenerationProcessor } from './processors/image-generation.processor';
 import { VariantProcessor } from './processors/variant.processor';
+import { ReferenceKitProcessor } from './processors/reference-kit.processor';
 import { FilesModule } from '../files/files.module';
 import { FalService } from '../../services/fal.service';
 import { GeminiService } from '../../services/gemini.service';
@@ -24,6 +25,7 @@ export { QUEUES } from './queues.constants';
       { name: QUEUES.FACE_SWAP },
       { name: QUEUES.IMAGE_GENERATION },
       { name: QUEUES.VARIANT },
+      { name: QUEUES.REFERENCE_KIT },
     ),
   ],
   controllers: [JobsController],
@@ -37,6 +39,7 @@ export { QUEUES } from './queues.constants';
     FaceSwapProcessor,
     ImageGenerationProcessor,
     VariantProcessor,
+    ReferenceKitProcessor,
   ],
   exports: [JobsService],
 })
