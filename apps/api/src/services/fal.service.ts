@@ -1330,28 +1330,63 @@ export class FalService implements OnModuleInit {
         input.onProgress({ status: 'GENERATING', logs: [{ message: 'Generating video with Sora...' }] });
       }
 
-      // Use OpenAI's video generation API
-      // Note: The exact API may vary - this follows the expected structure
-      const response = await openai.videos.generate({
-        model: 'sora',
-        input: {
-          prompt,
-          image_url: input.image_url,
-        },
+      // Use OpenAI's Sora video generation API
+      // API: POST /videos with model, prompt, duration, resolution
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (openai.videos as any).create({
+        model: 'sora-2-pro',
+        prompt,
+        duration: 5,
+        resolution: '1280x720',
       });
 
-      this.logger.log(`Sora response: ${JSON.stringify(response)}`);
+      this.logger.log(`Sora job created: ${JSON.stringify(response)}`);
+
+      // Poll for completion - Sora returns a job that needs to be polled
+      const jobId = response?.id;
+      if (!jobId) {
+        throw new Error('OpenAI Sora did not return a job ID');
+      }
+
+      if (input.onProgress) {
+        input.onProgress({ status: 'IN_PROGRESS', logs: [{ message: `Job ${jobId} created, waiting for completion...` }] });
+      }
+
+      // Poll for completion
+      let videoUrl: string | undefined;
+      const maxPolls = 120; // 10 minutes at 5 second intervals
+      const pollInterval = 5000;
+
+      for (let i = 0; i < maxPolls; i++) {
+        await new Promise((resolve) => setTimeout(resolve, pollInterval));
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const status = await (openai.videos as any).retrieve(jobId);
+        const statusState = status?.status;
+
+        this.logger.log(`Sora job ${jobId} status: ${statusState}`);
+
+        if (input.onProgress) {
+          input.onProgress({ status: statusState || 'POLLING', logs: [{ message: `Poll ${i + 1}: ${statusState}` }] });
+        }
+
+        if (statusState === 'completed') {
+          videoUrl = status?.url || status?.video_url;
+          break;
+        }
+
+        if (statusState === 'failed') {
+          const error = status?.error || 'Unknown error';
+          throw new Error(`OpenAI Sora generation failed: ${error}`);
+        }
+      }
+
+      if (!videoUrl) {
+        throw new Error('OpenAI Sora video generation timed out');
+      }
 
       if (input.onProgress) {
         input.onProgress({ status: 'COMPLETED', logs: [{ message: 'Video generation complete' }] });
-      }
-
-      // Extract video URL from response
-      const videoUrl = (response as { data?: { url?: string }; url?: string }).data?.url
-        || (response as { url?: string }).url;
-
-      if (!videoUrl) {
-        throw new Error('OpenAI Sora returned no video URL');
       }
 
       this.logger.log('Sora 2 Pro video generation completed');
