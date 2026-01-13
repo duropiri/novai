@@ -164,6 +164,20 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
 
     try {
       await this.jobsService.markJobProcessing(jobId);
+
+      // Store the models being used in output_payload at the start
+      await this.supabase.updateJob(jobId, {
+        output_payload: {
+          videoModel,
+          loraId,
+          loraTriggerWord: loraTriggerWord || null,
+          targetFaceSource,
+          upscaleMethod,
+          upscaleResolution,
+          logs: [],
+        },
+      });
+
       await this.updateProgress(jobId, 2, 'Starting advanced pipeline...');
 
       this.logger.log(`[${jobId}] Advanced Face Swap Pipeline started`);

@@ -718,10 +718,19 @@ export default function AISwapperPage() {
           ) : (
             <div className="space-y-3">
               {recentJobs.map((job) => {
-                const inputPayload = job.input_payload as { videoModel?: string; loraId?: string; targetFaceSource?: string } | null;
-                const outputPayload = job.output_payload as { first_frame_skipped?: boolean; skip_reason?: string; logs?: string[] } | null;
+                const outputPayload = job.output_payload as {
+                  videoModel?: string;
+                  loraId?: string;
+                  loraTriggerWord?: string;
+                  targetFaceSource?: string;
+                  upscaleMethod?: string;
+                  upscaleResolution?: string;
+                  first_frame_skipped?: boolean;
+                  skip_reason?: string;
+                  logs?: string[];
+                } | null;
                 const firstFrameSkipped = outputPayload?.first_frame_skipped;
-                const videoModel = inputPayload?.videoModel || 'kling';
+                const videoModel = outputPayload?.videoModel;
                 const logs = outputPayload?.logs || [];
 
                 // Model display name mapping
@@ -746,10 +755,12 @@ export default function AISwapperPage() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         {getJobStatusBadge(job)}
-                        {/* Model Badge */}
-                        <Badge variant="outline" className="text-xs">
-                          {modelDisplayNames[videoModel] || videoModel}
-                        </Badge>
+                        {/* Model Badge - only show if we have the model info */}
+                        {videoModel && (
+                          <Badge variant="outline" className="text-xs">
+                            {modelDisplayNames[videoModel] || videoModel}
+                          </Badge>
+                        )}
                         {job.progress > 0 && job.progress < 100 && (
                           <span className="text-xs text-muted-foreground">{job.progress}%</span>
                         )}
