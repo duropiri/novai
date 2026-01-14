@@ -13,10 +13,12 @@ import {
   UploadedFiles,
 } from '@nestjs/common';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
-import { IsString, IsNotEmpty, IsOptional, IsNumber, IsUrl, Min, Max } from 'class-validator';
+import { IsString, IsNotEmpty, IsOptional, IsNumber, IsUrl, IsBoolean, IsArray, IsIn, Min, Max } from 'class-validator';
 import { Type } from 'class-transformer';
 import { LoraService, CreateLoraDto } from './lora.service';
 import { DbLoraModel } from '../files/supabase.service';
+import { DatasetAnalysisService, DatasetAnalysisResult } from '../../services/dataset-analysis.service';
+import { TrainingOptimizerService } from '../../services/training-optimizer.service';
 
 export class CreateLoraRequestDto {
   @IsString()
@@ -33,10 +35,73 @@ export class CreateLoraRequestDto {
 
   @IsOptional()
   @IsNumber()
-  @Min(100)
-  @Max(10000)
+  @Min(10)
+  @Max(6000)
   @Type(() => Number)
   steps?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0.00001)
+  @Max(0.01)
+  @Type(() => Number)
+  learningRate?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  @Type(() => Boolean)
+  isStyle?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  @Type(() => Boolean)
+  includeSyntheticCaptions?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  @Type(() => Boolean)
+  useFaceDetection?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  @Type(() => Boolean)
+  useFaceCropping?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  @Type(() => Boolean)
+  useMasks?: boolean;
+
+  // Dataset analysis options (Studio Reverse Engineering Engine)
+  @IsOptional()
+  @IsBoolean()
+  @Type(() => Boolean)
+  enableAnalysis?: boolean;
+
+  @IsOptional()
+  @IsIn(['quick', 'standard', 'comprehensive'])
+  analysisMode?: 'quick' | 'standard' | 'comprehensive';
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  imageUrls?: string[];
+}
+
+export class AnalyzeDatasetRequestDto {
+  @IsArray()
+  @IsString({ each: true })
+  @IsNotEmpty()
+  imageUrls!: string[];
+
+  @IsOptional()
+  @IsIn(['quick', 'standard', 'comprehensive'])
+  mode?: 'quick' | 'standard' | 'comprehensive';
+
+  @IsOptional()
+  @IsBoolean()
+  @Type(() => Boolean)
+  isStyle?: boolean;
 }
 
 export class ImportLoraRequestDto {
@@ -59,7 +124,11 @@ export class ImportLoraRequestDto {
 
 @Controller('lora')
 export class LoraController {
-  constructor(private readonly loraService: LoraService) {}
+  constructor(
+    private readonly loraService: LoraService,
+    private readonly datasetAnalysis: DatasetAnalysisService,
+    private readonly trainingOptimizer: TrainingOptimizerService,
+  ) {}
 
   @Post()
   async create(@Body() dto: CreateLoraRequestDto): Promise<DbLoraModel> {
@@ -78,13 +147,33 @@ export class LoraController {
       triggerWord: dto.triggerWord.trim().toLowerCase(),
       imagesZipUrl: dto.imagesZipUrl.trim(),
       steps: dto.steps,
+      learningRate: dto.learningRate,
+      isStyle: dto.isStyle,
+      includeSyntheticCaptions: dto.includeSyntheticCaptions,
+      useFaceDetection: dto.useFaceDetection,
+      useFaceCropping: dto.useFaceCropping,
+      useMasks: dto.useMasks,
+      // Dataset analysis options
+      enableAnalysis: dto.enableAnalysis,
+      analysisMode: dto.analysisMode,
+      imageUrls: dto.imageUrls,
     };
 
     // Validate steps if provided
     if (createDto.steps !== undefined) {
-      if (createDto.steps < 100 || createDto.steps > 10000) {
+      if (createDto.steps < 10 || createDto.steps > 6000) {
         throw new HttpException(
-          'Steps must be between 100 and 10000',
+          'Steps must be between 10 and 6000',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+    }
+
+    // Validate learning rate if provided
+    if (createDto.learningRate !== undefined) {
+      if (createDto.learningRate < 0.00001 || createDto.learningRate > 0.01) {
+        throw new HttpException(
+          'Learning rate must be between 0.00001 and 0.01',
           HttpStatus.BAD_REQUEST,
         );
       }
@@ -271,6 +360,38 @@ export class LoraController {
     }
   }
 
+  @Post(':id/cancel')
+  async cancel(@Param('id') id: string): Promise<DbLoraModel> {
+    try {
+      return await this.loraService.cancel(id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to cancel LoRA training';
+      if (message === 'LoRA model not found') {
+        throw new HttpException(message, HttpStatus.NOT_FOUND);
+      }
+      if (message.includes('Cannot cancel')) {
+        throw new HttpException(message, HttpStatus.BAD_REQUEST);
+      }
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  @Post(':id/retry')
+  async retry(@Param('id') id: string): Promise<DbLoraModel> {
+    try {
+      return await this.loraService.retry(id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to retry LoRA training';
+      if (message === 'LoRA model not found') {
+        throw new HttpException(message, HttpStatus.NOT_FOUND);
+      }
+      if (message.includes('Cannot retry')) {
+        throw new HttpException(message, HttpStatus.BAD_REQUEST);
+      }
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
   @Delete(':id')
   async delete(@Param('id') id: string): Promise<{ success: boolean }> {
     try {
@@ -311,6 +432,110 @@ export class LoraController {
       return await this.loraService.cleanupStuck(minutes);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to cleanup stuck LoRAs';
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  /**
+   * Analyze a dataset before training
+   * Returns quality scores, gaps, and recommended training parameters
+   */
+  @Post('analyze')
+  async analyzeDataset(
+    @Body() dto: AnalyzeDatasetRequestDto,
+  ): Promise<{
+    analysis: DatasetAnalysisResult;
+    recommendations: {
+      steps: number;
+      learningRate: number;
+      useFaceDetection: boolean;
+      useFaceCropping: boolean;
+      useMasks: boolean;
+      includeSyntheticCaptions: boolean;
+      confidence: number;
+      reasoning: string[];
+    };
+    estimatedCost: {
+      analysisCents: number;
+      trainingCents: number;
+      totalCents: number;
+    };
+  }> {
+    if (!dto.imageUrls || dto.imageUrls.length === 0) {
+      throw new HttpException('At least one image URL is required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      // Run dataset analysis
+      const mode = dto.mode ?? 'standard';
+      const analysis = await this.datasetAnalysis.analyzeDataset(dto.imageUrls, mode);
+
+      // Get optimized training parameters
+      const optimized = this.trainingOptimizer.optimize({
+        userParams: { isStyle: dto.isStyle ?? false },
+        analysis,
+      });
+
+      // Calculate estimated costs
+      const analysisCents = analysis.totalCost;
+      const trainingCents = 200; // $2.00 for WAN 2.2 training
+
+      return {
+        analysis,
+        recommendations: {
+          steps: optimized.steps,
+          learningRate: optimized.learningRate,
+          useFaceDetection: optimized.useFaceDetection,
+          useFaceCropping: optimized.useFaceCropping,
+          useMasks: optimized.useMasks,
+          includeSyntheticCaptions: optimized.includeSyntheticCaptions,
+          confidence: optimized.confidence,
+          reasoning: optimized.reasoning,
+        },
+        estimatedCost: {
+          analysisCents,
+          trainingCents,
+          totalCents: analysisCents + trainingCents,
+        },
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to analyze dataset';
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  /**
+   * Quick dataset check without full analysis
+   * Returns basic quality estimate and suggested analysis mode
+   */
+  @Post('quick-check')
+  async quickCheck(
+    @Body() dto: { imageUrls: string[] },
+  ): Promise<{
+    totalImages: number;
+    estimatedValidImages: number;
+    suggestedMode: 'quick' | 'standard' | 'comprehensive';
+    warnings: string[];
+    quickRecommendations: {
+      recommendedSteps: number;
+      recommendedLR: number;
+      warning?: string;
+    };
+  }> {
+    if (!dto.imageUrls || dto.imageUrls.length === 0) {
+      throw new HttpException('At least one image URL is required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      const check = await this.datasetAnalysis.quickCheck(dto.imageUrls);
+      const quickRec = this.trainingOptimizer.getQuickRecommendation(dto.imageUrls.length);
+
+      return {
+        ...check,
+        quickRecommendations: quickRec,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to quick check dataset';
       throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }

@@ -438,6 +438,81 @@ NOVAI
 
 ---
 
+## Identity Analysis System (Studio Reverse Engineering Engine)
+
+### Overview
+Advanced character identity system that extracts mathematical metadata from input images to ensure consistent AI avatar generation. Uses a bi-directional hybrid approach combining AI models with geometric constraints.
+
+### Architecture
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      STUDIO REVERSE ENGINEERING ENGINE                       │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                    IMAGE ANALYSIS PIPELINE                           │   │
+│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌─────────────┐ │   │
+│  │  │ Face Geometry│ │   Lighting   │ │    Camera    │ │    Body     │ │   │
+│  │  │   Analyzer   │ │   Profiler   │ │  Estimator   │ │  Analyzer   │ │   │
+│  │  └──────────────┘ └──────────────┘ └──────────────┘ └─────────────┘ │   │
+│  │  ┌──────────────┐ ┌──────────────┐                                  │   │
+│  │  │    Style     │ │   Quality    │                                  │   │
+│  │  │ Fingerprint  │ │   Scorer     │                                  │   │
+│  │  └──────────────┘ └──────────────┘                                  │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                      │                                      │
+│                                      ▼                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                IDENTITY-CONSTRAINED GENERATION                       │   │
+│  │  PromptBuilder → Multi-Reference Gemini → Validation Loop            │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                      │                                      │
+│                                      ▼                                      │
+│                       CHARACTER IDENTITY PROFILE                            │
+│                          (Stored in PostgreSQL)                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Services
+| Service | Purpose | Location |
+|---------|---------|----------|
+| `IdentityAnalysisService` | Analyze images, extract metadata | `apps/api/src/services/identity-analysis.service.ts` |
+| `PromptBuilderService` | Build dynamic prompts from profiles | `apps/api/src/services/prompt-builder.service.ts` |
+| `DatasetAnalysisService` | Pre-training dataset analysis | `apps/api/src/services/dataset-analysis.service.ts` |
+| `TrainingOptimizerService` | Optimize LoRA training parameters | `apps/api/src/services/training-optimizer.service.ts` |
+
+### Data Flow
+```
+1. User uploads multiple images (3-1000+)
+2. IdentityAnalysisService analyzes each image:
+   - Face geometry (shape, proportions, angles)
+   - Body proportions (limb ratios, body type)
+   - Lighting profile (direction, temperature, intensity)
+   - Camera parameters (focal length, distance)
+   - Style fingerprint (skin tone, hair, makeup)
+3. Results aggregated into unified Character Identity Profile
+4. PromptBuilderService generates identity-constrained prompts
+5. GeminiService.generateWithMultipleReferences() uses all images
+6. Output validated against profile (threshold: 85%)
+7. Re-generation with hints if validation fails (max 3 attempts)
+```
+
+### Database Tables (Migration 00013)
+```sql
+character_analysis_sessions    -- Track analysis jobs
+character_image_analyses       -- Per-image analysis results
+character_identity_profiles    -- Aggregated unified profiles
+```
+
+### Cost Estimates
+| Operation | Cost |
+|-----------|------|
+| Image analysis | ~$0.01/image |
+| Multi-reference generation | ~$0.02/generation |
+| Output validation | ~$0.01/check |
+| Total (20 images + generation) | ~$0.25 |
+
+---
+
 ## Decision Log
 
 ### Decision: Use Google Gemini for Character Diagrams

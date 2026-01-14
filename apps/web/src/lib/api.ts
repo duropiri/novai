@@ -143,11 +143,23 @@ export interface LoraModel {
   status: 'pending' | 'training' | 'ready' | 'failed';
   training_images_url: string | null;
   training_steps: number;
+  // Primary LoRA for inference (high_noise_lora from WAN 2.2)
+  lora_url: string | null;
+  // DEPRECATED: Use lora_url instead
   weights_url: string | null;
+  // Reference links (not used for inference)
+  diffusers_lora_url: string | null;
   config_url: string | null;
   thumbnail_url: string | null;
   cost_cents: number | null;
   error_message: string | null;
+  // WAN 2.2 training fields
+  trainer: 'flux-fast' | 'wan-22' | 'manual' | 'imported' | null;
+  learning_rate: number | null;
+  is_style: boolean;
+  progress: number | null;
+  status_message: string | null;
+  // Timestamps
   created_at: string;
   updated_at: string;
   completed_at: string | null;
@@ -157,7 +169,14 @@ export interface CreateLoraRequest {
   name: string;
   triggerWord: string;
   imagesZipUrl: string;
+  // WAN 2.2 training options
   steps?: number;
+  learningRate?: number;
+  isStyle?: boolean;
+  includeSyntheticCaptions?: boolean;
+  useFaceDetection?: boolean;
+  useFaceCropping?: boolean;
+  useMasks?: boolean;
 }
 
 export interface UploadLoraRequest {
@@ -237,6 +256,16 @@ export const loraApi = {
     return response.json();
   },
 
+  cancel: (id: string) =>
+    fetchApi<LoraModel>(`/lora/${id}/cancel`, {
+      method: 'POST',
+    }),
+
+  retry: (id: string) =>
+    fetchApi<LoraModel>(`/lora/${id}/retry`, {
+      method: 'POST',
+    }),
+
   delete: (id: string) =>
     fetchApi<{ success: boolean }>(`/lora/${id}`, {
       method: 'DELETE',
@@ -308,6 +337,9 @@ export interface CharacterDiagram {
   outfit_description: string | null;
   background_description: string | null;
   pose: string | null;
+  // Multi-image support
+  image_count: number;
+  primary_image_url: string | null;
   // Status
   status: 'pending' | 'processing' | 'ready' | 'failed';
   error_message: string | null;
@@ -316,14 +348,27 @@ export interface CharacterDiagram {
   updated_at: string;
 }
 
-export interface CreateCharacterDiagramRequest {
-  name?: string;
-  sourceImageUrl: string;
+export interface CharacterDiagramImage {
+  id: string;
+  character_diagram_id: string;
+  image_url: string;
+  image_type: string;
+  is_primary: boolean;
+  sort_order: number;
+  created_at: string;
 }
 
-export interface CreateCharacterDiagramFromLoraRequest {
+export interface CharacterDiagramWithImages extends CharacterDiagram {
+  images: CharacterDiagramImage[];
+}
+
+export interface CreateCharacterDiagramRequest {
   name?: string;
-  loraId: string;
+  sourceImageUrl?: string; // Single image (backward compatible)
+  imageUrls?: string[]; // Multiple images (new)
+  primaryImageIndex?: number;
+  imageTypes?: Record<number, string>;
+  clothingOption?: 'original' | 'minimal'; // 'original' keeps outfit, 'minimal' for body proportions
 }
 
 export interface UploadCharacterDiagramRequest {
@@ -337,14 +382,14 @@ export const characterApi = {
 
   get: (id: string) => fetchApi<CharacterDiagram>(`/characters/${id}`),
 
+  getWithImages: (id: string) =>
+    fetchApi<CharacterDiagramWithImages>(`/characters/${id}?include=images`),
+
+  getImages: (id: string) =>
+    fetchApiSilent<CharacterDiagramImage[]>(`/characters/${id}/images`, []),
+
   create: (data: CreateCharacterDiagramRequest) =>
     fetchApi<CharacterDiagram>('/characters', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
-
-  createFromLora: (data: CreateCharacterDiagramFromLoraRequest) =>
-    fetchApi<CharacterDiagram>('/characters/from-lora', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
@@ -366,6 +411,22 @@ export const characterApi = {
 
     return response.json();
   },
+
+  addImages: (id: string, imageUrls: string[], imageTypes?: Record<number, string>) =>
+    fetchApi<CharacterDiagramImage[]>(`/characters/${id}/images`, {
+      method: 'POST',
+      body: JSON.stringify({ imageUrls, imageTypes }),
+    }),
+
+  setPrimaryImage: (id: string, imageId: string) =>
+    fetchApi<{ success: boolean }>(`/characters/${id}/images/${imageId}/primary`, {
+      method: 'PATCH',
+    }),
+
+  deleteImage: (id: string, imageId: string) =>
+    fetchApi<{ success: boolean }>(`/characters/${id}/images/${imageId}`, {
+      method: 'DELETE',
+    }),
 
   update: (id: string, data: { name: string }) =>
     fetchApi<CharacterDiagram>(`/characters/${id}`, {
@@ -445,7 +506,7 @@ export interface Video {
 
 export interface CreateVideoRequest {
   name: string;
-  collectionId: string;
+  collectionId?: string;
   fileUrl: string;
   thumbnailUrl?: string;
   durationSeconds?: number;
@@ -631,31 +692,40 @@ export const jobsApi = {
 };
 
 // Face Swap API
+// Video strategy types
+export type VideoStrategy = 'face_swap' | 'lora_generate' | 'video_lora' | 'hybrid';
+export type VideoModel = 'kling' | 'kling-2.5' | 'kling-2.6' | 'luma' | 'sora2pro' | 'wan';
+export type UpscaleMethod = 'real-esrgan' | 'clarity' | 'creative' | 'none';
+
 export interface FaceSwapResult {
   success: boolean;
   jobId: string;
   videoId: string;
   targetFaceSource: 'upload' | 'character_diagram' | 'reference_kit';
+  strategy: VideoStrategy;
   estimatedCostCents: number;
 }
 
 export interface CreateFaceSwapRequest {
   videoId: string;
+  // Strategy selection - determines the processing pipeline
+  strategy?: VideoStrategy;
   // Target face - at least one required
   uploadedFaceUrl?: string;
   characterDiagramId?: string;
   referenceKitId?: string;
-  // LoRA model - REQUIRED for advanced pipeline
-  loraId: string;
-  // Video generation model
-  videoModel: 'kling' | 'kling-2.5' | 'kling-2.6' | 'luma' | 'sora2pro' | 'wan';
+  // LoRA model - required for lora_generate and hybrid strategies
+  loraId?: string;
+  // Video generation model (used by lora_generate, video_lora, hybrid)
+  videoModel?: VideoModel;
   // Processing options
-  keepOriginalOutfit: boolean;
+  keepOriginalOutfit?: boolean;
   // Upscaling options
-  upscaleMethod: 'real-esrgan' | 'clarity' | 'creative' | 'none';
+  upscaleMethod?: UpscaleMethod;
   upscaleResolution?: '2k' | '4k';
-  // Key frame count (5-10)
-  keyFrameCount: number;
+  // Strategy-specific options
+  keyFrameCount?: number; // For video_lora: frames to train on
+  refinementStrength?: number; // For hybrid: refinement intensity (0-1)
 }
 
 export const swapApi = {
@@ -963,6 +1033,10 @@ export interface ReferenceKit {
   half_body_url: string | null;
   full_body_url: string | null;
   expressions: Record<string, string>;
+  // Multi-image support
+  source_image_count: number;
+  uses_provided_images: boolean;
+  // Status
   status: 'pending' | 'generating' | 'ready' | 'failed';
   generation_progress: Record<string, string>;
   error_message: string | null;
@@ -970,9 +1044,24 @@ export interface ReferenceKit {
   updated_at: string;
 }
 
+export interface ReferenceKitSourceImage {
+  id: string;
+  reference_kit_id: string;
+  image_url: string;
+  image_type: string;
+  sort_order: number;
+  created_at: string;
+}
+
+export interface ReferenceKitWithSources extends ReferenceKit {
+  sources: ReferenceKitSourceImage[];
+}
+
 export interface CreateReferenceKitRequest {
   name: string;
-  sourceImageUrl: string;
+  sourceImageUrl?: string; // Single image (backward compatible)
+  imageUrls?: string[]; // Multiple source images
+  imageTypes?: Record<number, string>;
   generateExtended?: boolean;
   expressions?: string[];
 }
@@ -983,10 +1072,27 @@ export const referenceKitApi = {
 
   get: (id: string) => fetchApi<ReferenceKit>(`/reference-kits/${id}`),
 
+  getWithSources: (id: string) =>
+    fetchApi<ReferenceKitWithSources>(`/reference-kits/${id}?include=sources`),
+
+  getSources: (id: string) =>
+    fetchApiSilent<ReferenceKitSourceImage[]>(`/reference-kits/${id}/sources`, []),
+
   create: (data: CreateReferenceKitRequest) =>
     fetchApi<ReferenceKit>('/reference-kits', {
       method: 'POST',
       body: JSON.stringify(data),
+    }),
+
+  addSources: (id: string, imageUrls: string[], imageTypes?: Record<number, string>) =>
+    fetchApi<ReferenceKitSourceImage[]>(`/reference-kits/${id}/sources`, {
+      method: 'POST',
+      body: JSON.stringify({ imageUrls, imageTypes }),
+    }),
+
+  deleteSource: (id: string, sourceId: string) =>
+    fetchApi<{ success: boolean }>(`/reference-kits/${id}/sources/${sourceId}`, {
+      method: 'DELETE',
     }),
 
   update: (id: string, data: { name: string }) =>

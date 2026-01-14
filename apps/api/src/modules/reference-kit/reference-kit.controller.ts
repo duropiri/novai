@@ -10,8 +10,8 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
-import { IsString, IsNotEmpty, IsOptional, IsBoolean, IsArray } from 'class-validator';
-import { ReferenceKitService } from './reference-kit.service';
+import { IsString, IsNotEmpty, IsOptional, IsBoolean, IsArray, IsObject } from 'class-validator';
+import { ReferenceKitService, ReferenceKitSourceImage, ReferenceKitWithSources } from './reference-kit.service';
 import { DbReferenceKit } from '../files/supabase.service';
 
 export class CreateReferenceKitDto {
@@ -20,8 +20,17 @@ export class CreateReferenceKitDto {
   name!: string;
 
   @IsString()
-  @IsNotEmpty()
-  sourceImageUrl!: string;
+  @IsOptional()
+  sourceImageUrl?: string; // Single image (backward compatible)
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  imageUrls?: string[]; // Multiple source images
+
+  @IsOptional()
+  @IsObject()
+  imageTypes?: Record<number, string>;
 
   @IsOptional()
   @IsBoolean()
@@ -48,8 +57,10 @@ export class ReferenceKitController {
     if (!dto.name?.trim()) {
       throw new HttpException('Name is required', HttpStatus.BAD_REQUEST);
     }
-    if (!dto.sourceImageUrl?.trim()) {
-      throw new HttpException('Source image URL is required', HttpStatus.BAD_REQUEST);
+    // Support both single image and multiple images
+    const hasImages = dto.imageUrls?.length || dto.sourceImageUrl?.trim();
+    if (!hasImages) {
+      throw new HttpException('At least one source image URL is required', HttpStatus.BAD_REQUEST);
     }
 
     // Validate expressions if provided
@@ -68,7 +79,9 @@ export class ReferenceKitController {
     try {
       return await this.referenceKitService.create({
         name: dto.name.trim(),
-        sourceImageUrl: dto.sourceImageUrl.trim(),
+        sourceImageUrl: dto.sourceImageUrl?.trim(),
+        imageUrls: dto.imageUrls,
+        imageTypes: dto.imageTypes,
         generateExtended: dto.generateExtended,
         expressions: dto.expressions,
       });
@@ -91,12 +104,69 @@ export class ReferenceKitController {
   }
 
   @Get(':id')
-  async findOne(@Param('id') id: string): Promise<DbReferenceKit> {
+  async findOne(@Param('id') id: string, @Query('include') include?: string): Promise<DbReferenceKit | ReferenceKitWithSources> {
+    if (include === 'sources') {
+      const kit = await this.referenceKitService.findOneWithSources(id);
+      if (!kit) {
+        throw new HttpException('Reference Kit not found', HttpStatus.NOT_FOUND);
+      }
+      return kit;
+    }
+
     const kit = await this.referenceKitService.findOne(id);
     if (!kit) {
       throw new HttpException('Reference Kit not found', HttpStatus.NOT_FOUND);
     }
     return kit;
+  }
+
+  @Get(':id/sources')
+  async getSources(@Param('id') id: string): Promise<ReferenceKitSourceImage[]> {
+    const kit = await this.referenceKitService.findOne(id);
+    if (!kit) {
+      throw new HttpException('Reference Kit not found', HttpStatus.NOT_FOUND);
+    }
+    return this.referenceKitService.getSources(id);
+  }
+
+  @Post(':id/sources')
+  async addSources(
+    @Param('id') id: string,
+    @Body() body: { imageUrls: string[]; imageTypes?: Record<number, string> },
+  ): Promise<ReferenceKitSourceImage[]> {
+    if (!body.imageUrls?.length) {
+      throw new HttpException('At least one image URL is required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      return await this.referenceKitService.addSources(id, body.imageUrls, body.imageTypes);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to add source images';
+      if (message === 'Reference Kit not found') {
+        throw new HttpException(message, HttpStatus.NOT_FOUND);
+      }
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  @Delete(':id/sources/:sourceId')
+  async deleteSource(
+    @Param('id') id: string,
+    @Param('sourceId') sourceId: string,
+  ): Promise<{ success: boolean }> {
+    try {
+      await this.referenceKitService.deleteSource(id, sourceId);
+      return { success: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to delete source image';
+      if (message === 'Source image not found') {
+        throw new HttpException(message, HttpStatus.NOT_FOUND);
+      }
+      if (message.includes('Cannot delete')) {
+        throw new HttpException(message, HttpStatus.BAD_REQUEST);
+      }
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
   }
 
   @Patch(':id')

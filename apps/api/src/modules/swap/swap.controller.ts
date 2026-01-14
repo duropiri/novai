@@ -11,11 +11,18 @@ import {
 import { IsString, IsNotEmpty, IsOptional, IsBoolean, IsNumber, IsIn, Min, Max, IsUrl } from 'class-validator';
 import { Type } from 'class-transformer';
 import { SwapService, CreateFaceSwapDto } from './swap.service';
+import { VideoStrategy, VideoModel, UpscaleMethod } from '@novai/shared';
 
 class CreateSwapRequestDto {
   @IsString()
   @IsNotEmpty()
   videoId!: string;
+
+  // Strategy selection - determines the processing pipeline
+  @IsOptional()
+  @IsString()
+  @IsIn(['face_swap', 'lora_generate', 'video_lora', 'hybrid'])
+  strategy?: VideoStrategy;
 
   // Target face - at least one required (uploaded URL, character diagram, or reference kit)
   @IsOptional()
@@ -31,36 +38,47 @@ class CreateSwapRequestDto {
   @IsString()
   referenceKitId?: string;
 
-  // LoRA model - REQUIRED for advanced pipeline
+  // LoRA model - required for lora_generate and hybrid strategies
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  loraId!: string;
+  loraId?: string;
 
-  // Video generation model - REQUIRED
+  // Video generation model (used by lora_generate, video_lora, hybrid)
+  @IsOptional()
   @IsString()
   @IsIn(['kling', 'kling-2.5', 'kling-2.6', 'luma', 'sora2pro', 'wan'])
-  videoModel!: 'kling' | 'kling-2.5' | 'kling-2.6' | 'luma' | 'sora2pro' | 'wan';
+  videoModel?: VideoModel;
 
   // Processing options
+  @IsOptional()
   @IsBoolean()
-  keepOriginalOutfit!: boolean;
+  keepOriginalOutfit?: boolean;
 
   // Upscaling options
+  @IsOptional()
   @IsString()
   @IsIn(['real-esrgan', 'clarity', 'creative', 'none'])
-  upscaleMethod!: 'real-esrgan' | 'clarity' | 'creative' | 'none';
+  upscaleMethod?: UpscaleMethod;
 
   @IsOptional()
   @IsString()
   @IsIn(['2k', '4k'])
   upscaleResolution?: '2k' | '4k';
 
-  // Key frame count for processing (5-10)
+  // Strategy-specific options
+  @IsOptional()
   @IsNumber()
   @Min(5)
-  @Max(10)
+  @Max(30)
   @Type(() => Number)
-  keyFrameCount!: number;
+  keyFrameCount?: number; // For video_lora: frames to train on
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  @Type(() => Number)
+  refinementStrength?: number; // For hybrid: refinement intensity (0-1)
 }
 
 @Controller('swap')
@@ -78,23 +96,27 @@ export class SwapController {
       throw new HttpException('Target face is required (upload URL, Character Diagram ID, or Reference Kit ID)', HttpStatus.BAD_REQUEST);
     }
 
-    // LoRA is now required
-    if (!dto.loraId?.trim()) {
-      throw new HttpException('LoRA model ID is required', HttpStatus.BAD_REQUEST);
+    const strategy = dto.strategy || 'lora_generate';
+
+    // LoRA is required for lora_generate and hybrid strategies
+    if ((strategy === 'lora_generate' || strategy === 'hybrid') && !dto.loraId?.trim()) {
+      throw new HttpException(`LoRA model ID is required for ${strategy} strategy`, HttpStatus.BAD_REQUEST);
     }
 
     try {
       const result = await this.swapService.createFaceSwap({
         videoId: dto.videoId.trim(),
+        strategy,
         uploadedFaceUrl: dto.uploadedFaceUrl?.trim(),
         characterDiagramId: dto.characterDiagramId?.trim(),
         referenceKitId: dto.referenceKitId?.trim(),
-        loraId: dto.loraId.trim(),
+        loraId: dto.loraId?.trim(),
         videoModel: dto.videoModel,
         keepOriginalOutfit: dto.keepOriginalOutfit,
         upscaleMethod: dto.upscaleMethod,
         upscaleResolution: dto.upscaleResolution,
         keyFrameCount: dto.keyFrameCount,
+        refinementStrength: dto.refinementStrength,
       });
 
       return {
@@ -107,7 +129,7 @@ export class SwapController {
       if (message.includes('not found')) {
         throw new HttpException(message, HttpStatus.NOT_FOUND);
       }
-      if (message.includes('not ready')) {
+      if (message.includes('not ready') || message.includes('required')) {
         throw new HttpException(message, HttpStatus.BAD_REQUEST);
       }
 

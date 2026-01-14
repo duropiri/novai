@@ -3,7 +3,7 @@ import { SupabaseService, DbVideo } from '../files/supabase.service';
 
 export interface CreateVideoDto {
   name: string;
-  collectionId: string;
+  collectionId: string | null;
   fileUrl: string;
   thumbnailUrl?: string;
   durationSeconds?: number;

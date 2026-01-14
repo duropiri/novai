@@ -10,11 +10,28 @@ export interface DbLoraModel {
   status: 'pending' | 'training' | 'ready' | 'failed';
   training_images_url: string | null;
   training_steps: number;
+  // Primary LoRA file for inference (high_noise_lora from WAN 2.2)
+  lora_url: string | null;
+  // DEPRECATED: Use lora_url instead. Kept for backward compatibility.
   weights_url: string | null;
+  // Reference link to diffusers-format LoRA (not used for inference)
+  diffusers_lora_url: string | null;
   config_url: string | null;
   thumbnail_url: string | null;
   cost_cents: number | null;
   error_message: string | null;
+  // WAN 2.2 trainer fields
+  trainer: 'flux-fast' | 'wan-22' | 'manual' | 'imported';
+  learning_rate: number | null;
+  is_style: boolean;
+  progress: number | null;
+  status_message: string | null;
+  // Dataset analysis fields (Studio Reverse Engineering Engine)
+  dataset_analysis?: Record<string, unknown> | null;
+  applied_optimizations?: Record<string, unknown> | null;
+  validation_result?: Record<string, unknown> | null;
+  quality_score?: number | null;
+  // Timestamps
   created_at: string;
   updated_at: string;
   completed_at: string | null;
@@ -30,6 +47,9 @@ export interface DbCharacterDiagram {
   outfit_description?: string | null;
   background_description?: string | null;
   pose?: string | null;
+  // Multi-image support (optional - requires migration 00011)
+  image_count?: number;
+  primary_image_url?: string | null;
   // Status
   status: 'pending' | 'processing' | 'ready' | 'failed';
   error_message: string | null;
@@ -117,9 +137,92 @@ export interface DbReferenceKit {
   half_body_url: string | null;
   full_body_url: string | null;
   expressions: Record<string, string>;
+  // Multi-image support (optional - requires migration 00011)
+  source_image_count?: number;
+  uses_provided_images?: boolean;
+  // Identity profile link (optional - requires migration 00013)
+  identity_profile_id?: string | null;
+  // Status
   status: 'pending' | 'generating' | 'ready' | 'failed';
   generation_progress: Record<string, string>;
   error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ============================================
+// IDENTITY PROFILE TYPES (migration 00013)
+// ============================================
+
+export interface DbCharacterAnalysisSession {
+  id: string;
+  character_diagram_id: string | null;
+  reference_kit_id: string | null;
+  name: string | null;
+  status: 'pending' | 'processing' | 'analyzing' | 'aggregating' | 'ready' | 'failed';
+  total_images: number;
+  processed_images: number;
+  valid_images: number;
+  progress: number;
+  analysis_mode: 'quick' | 'standard' | 'comprehensive';
+  cost_limit_cents: number;
+  error_message: string | null;
+  total_cost_cents: number;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export interface DbCharacterImageAnalysis {
+  id: string;
+  session_id: string;
+  image_url: string;
+  image_hash: string | null;
+  quality_score: number | null;
+  blur_score: number | null;
+  lighting_score: number | null;
+  resolution_score: number | null;
+  face_visibility_score: number | null;
+  is_valid: boolean;
+  rejection_reason: string | null;
+  face_geometry: Record<string, unknown> | null;
+  face_geometry_confidence: number | null;
+  body_proportions: Record<string, unknown> | null;
+  body_proportions_confidence: number | null;
+  lighting_profile: Record<string, unknown> | null;
+  lighting_confidence: number | null;
+  camera_parameters: Record<string, unknown> | null;
+  camera_confidence: number | null;
+  style_fingerprint: Record<string, unknown> | null;
+  style_confidence: number | null;
+  expression_data: Record<string, unknown> | null;
+  processing_time_ms: number | null;
+  api_cost_cents: number;
+  created_at: string;
+}
+
+export interface DbCharacterIdentityProfile {
+  id: string;
+  session_id: string | null;
+  character_diagram_id: string | null;
+  reference_kit_id: string | null;
+  face_geometry_profile: Record<string, unknown> | null;
+  face_sample_count: number;
+  body_proportions_profile: Record<string, unknown> | null;
+  body_sample_count: number;
+  lighting_profile: Record<string, unknown> | null;
+  lighting_sample_count: number;
+  camera_profile: Record<string, unknown> | null;
+  camera_sample_count: number;
+  style_fingerprint: Record<string, unknown> | null;
+  style_sample_count: number;
+  overall_confidence: number | null;
+  data_consistency_score: number | null;
+  best_reference_image_url: string | null;
+  image_quality_ranking: Array<{ url: string; score: number }> | null;
+  analysis_model: string | null;
+  analysis_version: string;
+  total_cost_cents: number;
   created_at: string;
   updated_at: string;
 }
@@ -993,5 +1096,216 @@ export class SupabaseService implements OnModuleInit {
       .eq('id', id);
 
     if (error) throw new Error(`Failed to delete reference kit: ${error.message}`);
+  }
+
+  // ============================================
+  // DATABASE OPERATIONS - IDENTITY PROFILES
+  // ============================================
+
+  async createAnalysisSession(
+    session: Omit<DbCharacterAnalysisSession, 'id' | 'created_at' | 'updated_at' | 'completed_at'>,
+  ): Promise<DbCharacterAnalysisSession> {
+    const { data, error } = await this.client
+      .from('character_analysis_sessions')
+      .insert(session)
+      .select()
+      .single();
+
+    if (error) throw new Error(`Failed to create analysis session: ${error.message}`);
+    return data;
+  }
+
+  async getAnalysisSession(id: string): Promise<DbCharacterAnalysisSession | null> {
+    const { data, error } = await this.client
+      .from('character_analysis_sessions')
+      .select()
+      .eq('id', id)
+      .single();
+
+    if (error && error.code !== 'PGRST116') {
+      throw new Error(`Failed to get analysis session: ${error.message}`);
+    }
+    return data;
+  }
+
+  async updateAnalysisSession(
+    id: string,
+    update: Partial<DbCharacterAnalysisSession>,
+  ): Promise<DbCharacterAnalysisSession> {
+    const { data, error } = await this.client
+      .from('character_analysis_sessions')
+      .update(update)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw new Error(`Failed to update analysis session: ${error.message}`);
+    return data;
+  }
+
+  async getAnalysisSessionByDiagram(diagramId: string): Promise<DbCharacterAnalysisSession | null> {
+    const { data, error } = await this.client
+      .from('character_analysis_sessions')
+      .select()
+      .eq('character_diagram_id', diagramId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (error && error.code !== 'PGRST116') {
+      throw new Error(`Failed to get analysis session: ${error.message}`);
+    }
+    return data;
+  }
+
+  async createImageAnalysis(
+    analysis: Omit<DbCharacterImageAnalysis, 'id' | 'created_at'>,
+  ): Promise<DbCharacterImageAnalysis> {
+    const { data, error } = await this.client
+      .from('character_image_analyses')
+      .insert(analysis)
+      .select()
+      .single();
+
+    if (error) throw new Error(`Failed to create image analysis: ${error.message}`);
+    return data;
+  }
+
+  async createImageAnalysesBatch(
+    analyses: Array<Omit<DbCharacterImageAnalysis, 'id' | 'created_at'>>,
+  ): Promise<DbCharacterImageAnalysis[]> {
+    const { data, error } = await this.client
+      .from('character_image_analyses')
+      .insert(analyses)
+      .select();
+
+    if (error) throw new Error(`Failed to create image analyses: ${error.message}`);
+    return data || [];
+  }
+
+  async getImageAnalysesBySession(sessionId: string): Promise<DbCharacterImageAnalysis[]> {
+    const { data, error } = await this.client
+      .from('character_image_analyses')
+      .select()
+      .eq('session_id', sessionId)
+      .order('quality_score', { ascending: false });
+
+    if (error) throw new Error(`Failed to get image analyses: ${error.message}`);
+    return data || [];
+  }
+
+  async getValidImageAnalysesBySession(sessionId: string): Promise<DbCharacterImageAnalysis[]> {
+    const { data, error } = await this.client
+      .from('character_image_analyses')
+      .select()
+      .eq('session_id', sessionId)
+      .eq('is_valid', true)
+      .order('quality_score', { ascending: false });
+
+    if (error) throw new Error(`Failed to get valid image analyses: ${error.message}`);
+    return data || [];
+  }
+
+  async createIdentityProfile(
+    profile: Omit<DbCharacterIdentityProfile, 'id' | 'created_at' | 'updated_at'>,
+  ): Promise<DbCharacterIdentityProfile> {
+    const { data, error } = await this.client
+      .from('character_identity_profiles')
+      .insert(profile)
+      .select()
+      .single();
+
+    if (error) throw new Error(`Failed to create identity profile: ${error.message}`);
+    return data;
+  }
+
+  async getIdentityProfile(id: string): Promise<DbCharacterIdentityProfile | null> {
+    const { data, error } = await this.client
+      .from('character_identity_profiles')
+      .select()
+      .eq('id', id)
+      .single();
+
+    if (error && error.code !== 'PGRST116') {
+      throw new Error(`Failed to get identity profile: ${error.message}`);
+    }
+    return data;
+  }
+
+  async getIdentityProfileByDiagram(diagramId: string): Promise<DbCharacterIdentityProfile | null> {
+    const { data, error } = await this.client
+      .from('character_identity_profiles')
+      .select()
+      .eq('character_diagram_id', diagramId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (error && error.code !== 'PGRST116') {
+      throw new Error(`Failed to get identity profile: ${error.message}`);
+    }
+    return data;
+  }
+
+  async getIdentityProfileByReferenceKit(kitId: string): Promise<DbCharacterIdentityProfile | null> {
+    const { data, error } = await this.client
+      .from('character_identity_profiles')
+      .select()
+      .eq('reference_kit_id', kitId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (error && error.code !== 'PGRST116') {
+      throw new Error(`Failed to get identity profile: ${error.message}`);
+    }
+    return data;
+  }
+
+  async updateIdentityProfile(
+    id: string,
+    update: Partial<DbCharacterIdentityProfile>,
+  ): Promise<DbCharacterIdentityProfile> {
+    const { data, error } = await this.client
+      .from('character_identity_profiles')
+      .update(update)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw new Error(`Failed to update identity profile: ${error.message}`);
+    return data;
+  }
+
+  async deleteIdentityProfile(id: string): Promise<void> {
+    const { error } = await this.client
+      .from('character_identity_profiles')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw new Error(`Failed to delete identity profile: ${error.message}`);
+  }
+
+  // ============================================
+  // CHARACTER DIAGRAM IMAGES (multi-image support)
+  // ============================================
+
+  async getCharacterDiagramImages(diagramId: string): Promise<
+    Array<{
+      id: string;
+      image_url: string;
+      image_type: string;
+      is_primary: boolean;
+      sort_order: number;
+    }>
+  > {
+    const { data, error } = await this.client
+      .from('character_diagram_images')
+      .select('id, image_url, image_type, is_primary, sort_order')
+      .eq('character_diagram_id', diagramId)
+      .order('sort_order', { ascending: true });
+
+    if (error) throw new Error(`Failed to get character diagram images: ${error.message}`);
+    return data || [];
   }
 }

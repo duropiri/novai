@@ -13,11 +13,12 @@ import {
   UploadedFile,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { IsString, IsOptional, IsNotEmpty, IsUUID } from 'class-validator';
+import { IsString, IsOptional, IsNotEmpty, IsArray, IsInt, IsObject, Min, IsIn } from 'class-validator';
 import {
   CharacterService,
   CreateCharacterDiagramDto,
-  CreateCharacterDiagramFromLoraDto,
+  CharacterDiagramImage,
+  CharacterDiagramWithImages,
 } from './character.service';
 import { DbCharacterDiagram } from '../files/supabase.service';
 import { FilesService } from '../files/files.service';
@@ -28,18 +29,26 @@ class CreateCharacterRequestDto {
   name?: string;
 
   @IsString()
-  @IsNotEmpty()
-  sourceImageUrl!: string;
-}
-
-class CreateCharacterFromLoraRequestDto {
-  @IsString()
   @IsOptional()
-  name?: string;
+  sourceImageUrl?: string; // Single image (backward compatible)
 
-  @IsUUID()
-  @IsNotEmpty()
-  loraId!: string;
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  imageUrls?: string[]; // Multiple images (new)
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  primaryImageIndex?: number;
+
+  @IsOptional()
+  @IsObject()
+  imageTypes?: Record<number, string>;
+
+  @IsOptional()
+  @IsIn(['original', 'minimal'])
+  clothingOption?: 'original' | 'minimal';
 }
 
 class UpdateCharacterRequestDto {
@@ -57,41 +66,25 @@ export class CharacterController {
 
   @Post()
   async create(@Body() dto: CreateCharacterRequestDto): Promise<DbCharacterDiagram> {
-    if (!dto.sourceImageUrl?.trim()) {
-      throw new HttpException('Source image URL is required', HttpStatus.BAD_REQUEST);
+    // Support both single image and multiple images
+    const hasImages = dto.imageUrls?.length || dto.sourceImageUrl?.trim();
+    if (!hasImages) {
+      throw new HttpException('At least one image URL is required', HttpStatus.BAD_REQUEST);
     }
 
     const createDto: CreateCharacterDiagramDto = {
       name: dto.name?.trim(),
-      sourceImageUrl: dto.sourceImageUrl.trim(),
+      sourceImageUrl: dto.sourceImageUrl?.trim(),
+      imageUrls: dto.imageUrls,
+      primaryImageIndex: dto.primaryImageIndex,
+      imageTypes: dto.imageTypes,
+      clothingOption: dto.clothingOption,
     };
 
     try {
       return await this.characterService.create(createDto);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to create character diagram';
-      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
-    }
-  }
-
-  @Post('from-lora')
-  async createFromLora(@Body() dto: CreateCharacterFromLoraRequestDto): Promise<DbCharacterDiagram> {
-    if (!dto.loraId?.trim()) {
-      throw new HttpException('LoRA ID is required', HttpStatus.BAD_REQUEST);
-    }
-
-    const createDto: CreateCharacterDiagramFromLoraDto = {
-      name: dto.name?.trim(),
-      loraId: dto.loraId.trim(),
-    };
-
-    try {
-      return await this.characterService.createFromLora(createDto);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to create character diagram from LoRA';
-      if (message === 'LoRA model not found') {
-        throw new HttpException(message, HttpStatus.NOT_FOUND);
-      }
       throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -142,12 +135,86 @@ export class CharacterController {
   }
 
   @Get(':id')
-  async findOne(@Param('id') id: string): Promise<DbCharacterDiagram> {
+  async findOne(@Param('id') id: string, @Query('include') include?: string): Promise<DbCharacterDiagram | CharacterDiagramWithImages> {
+    if (include === 'images') {
+      const diagram = await this.characterService.findOneWithImages(id);
+      if (!diagram) {
+        throw new HttpException('Character diagram not found', HttpStatus.NOT_FOUND);
+      }
+      return diagram;
+    }
+
     const diagram = await this.characterService.findOne(id);
     if (!diagram) {
       throw new HttpException('Character diagram not found', HttpStatus.NOT_FOUND);
     }
     return diagram;
+  }
+
+  @Get(':id/images')
+  async getImages(@Param('id') id: string): Promise<CharacterDiagramImage[]> {
+    const diagram = await this.characterService.findOne(id);
+    if (!diagram) {
+      throw new HttpException('Character diagram not found', HttpStatus.NOT_FOUND);
+    }
+    return this.characterService.getImages(id);
+  }
+
+  @Post(':id/images')
+  async addImages(
+    @Param('id') id: string,
+    @Body() body: { imageUrls: string[]; imageTypes?: Record<number, string> },
+  ): Promise<CharacterDiagramImage[]> {
+    if (!body.imageUrls?.length) {
+      throw new HttpException('At least one image URL is required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      return await this.characterService.addImages(id, body.imageUrls, body.imageTypes);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to add images';
+      if (message === 'Character diagram not found') {
+        throw new HttpException(message, HttpStatus.NOT_FOUND);
+      }
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  @Patch(':id/images/:imageId/primary')
+  async setPrimaryImage(
+    @Param('id') id: string,
+    @Param('imageId') imageId: string,
+  ): Promise<{ success: boolean }> {
+    try {
+      await this.characterService.setPrimaryImage(id, imageId);
+      return { success: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to set primary image';
+      if (message === 'Image not found') {
+        throw new HttpException(message, HttpStatus.NOT_FOUND);
+      }
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  @Delete(':id/images/:imageId')
+  async deleteImage(
+    @Param('id') id: string,
+    @Param('imageId') imageId: string,
+  ): Promise<{ success: boolean }> {
+    try {
+      await this.characterService.deleteImage(id, imageId);
+      return { success: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to delete image';
+      if (message === 'Image not found') {
+        throw new HttpException(message, HttpStatus.NOT_FOUND);
+      }
+      if (message.includes('Cannot delete')) {
+        throw new HttpException(message, HttpStatus.BAD_REQUEST);
+      }
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
   }
 
   @Patch(':id')

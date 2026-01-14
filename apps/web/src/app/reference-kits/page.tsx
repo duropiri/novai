@@ -479,8 +479,18 @@ export default function ReferenceKitsPage() {
                         </Button>
                       </div>
                     ) : (
-                      <div className="w-full aspect-square bg-muted rounded-lg flex items-center justify-center">
+                      <div className="w-full aspect-square bg-muted rounded-lg flex flex-col items-center justify-center gap-2">
                         <User className="w-8 h-8 text-muted-foreground" />
+                        {selectedKit.generation_progress['anchor'] === 'failed' && (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => handleRegenerate(selectedKit.id, 'anchor')}
+                          >
+                            <RefreshCw className="w-3 h-3 mr-1" />
+                            Retry
+                          </Button>
+                        )}
                       </div>
                     )}
                   </div>
@@ -509,8 +519,18 @@ export default function ReferenceKitsPage() {
                         </Button>
                       </div>
                     ) : (
-                      <div className="w-full aspect-square bg-muted rounded-lg flex items-center justify-center">
+                      <div className="w-full aspect-square bg-muted rounded-lg flex flex-col items-center justify-center gap-2">
                         <User className="w-8 h-8 text-muted-foreground" />
+                        {selectedKit.generation_progress['profile'] === 'failed' && (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => handleRegenerate(selectedKit.id, 'profile')}
+                          >
+                            <RefreshCw className="w-3 h-3 mr-1" />
+                            Retry
+                          </Button>
+                        )}
                       </div>
                     )}
                   </div>
@@ -550,8 +570,18 @@ export default function ReferenceKitsPage() {
                             </Button>
                           </div>
                         ) : (
-                          <div className="w-full aspect-square bg-muted rounded-lg flex items-center justify-center">
+                          <div className="w-full aspect-square bg-muted rounded-lg flex flex-col items-center justify-center gap-2">
                             <User className="w-8 h-8 text-muted-foreground" />
+                            {(selectedKit.generation_progress['waist_up'] === 'failed' || selectedKit.generation_progress['half_body'] === 'failed') && (
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => handleRegenerate(selectedKit.id, 'waist_up')}
+                              >
+                                <RefreshCw className="w-3 h-3 mr-1" />
+                                Retry
+                              </Button>
+                            )}
                           </div>
                         )}
                       </div>
@@ -582,8 +612,18 @@ export default function ReferenceKitsPage() {
                             </Button>
                           </div>
                         ) : (
-                          <div className="w-full aspect-square bg-muted rounded-lg flex items-center justify-center">
+                          <div className="w-full aspect-square bg-muted rounded-lg flex flex-col items-center justify-center gap-2">
                             <User className="w-8 h-8 text-muted-foreground" />
+                            {selectedKit.generation_progress['full_body'] === 'failed' && (
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => handleRegenerate(selectedKit.id, 'full_body')}
+                              >
+                                <RefreshCw className="w-3 h-3 mr-1" />
+                                Retry
+                              </Button>
+                            )}
                           </div>
                         )}
                       </div>

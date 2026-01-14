@@ -14,6 +14,9 @@ import { GeminiService } from '../../services/gemini.service';
 import { KlingService } from '../../services/kling.service';
 import { PicsiService } from '../../services/picsi.service';
 import { LocalAIService } from '../../services/local-ai.service';
+import { FFmpegService } from '../../services/ffmpeg.service';
+import { IdentityAnalysisService } from '../../services/identity-analysis.service';
+import { PromptBuilderService } from '../../services/prompt-builder.service';
 import { QUEUES } from './queues.constants';
 
 export { QUEUES } from './queues.constants';
@@ -38,6 +41,9 @@ export { QUEUES } from './queues.constants';
     KlingService,
     PicsiService,
     LocalAIService,
+    FFmpegService,
+    IdentityAnalysisService,
+    PromptBuilderService,
     LoraProcessor,
     CharacterProcessor,
     FaceSwapProcessor,

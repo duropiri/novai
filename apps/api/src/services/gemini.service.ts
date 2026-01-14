@@ -23,8 +23,8 @@ export class GeminiService {
     }
   }
 
-  // The character diagram prompt from character diagram prompt.txt
-  private readonly CHARACTER_DIAGRAM_PROMPT = `Using the attached image as the sole visual reference, create a character reference sheet rendered entirely in a realistic photographic style.
+  // Base prompt shared between both clothing options
+  private readonly CHARACTER_DIAGRAM_BASE = `Using the attached image as the sole visual reference, create a character reference sheet rendered entirely in a realistic photographic style.
 The final output must be one single image containing two photographic views side-by-side on a clean, neutral background.
 
 1. Full-Body Photograph (CRITICAL)
@@ -33,7 +33,7 @@ Generate a true full-length, standing photograph of the person that is fully vis
 
 NO cropping is allowed.
 
-The entire body must be visible including shoes, feet, and the ground contact point.
+The entire body must be visible including feet and the ground contact point.
 
 Leave clear padding above the head and below the feet so nothing is cut off.
 
@@ -41,11 +41,7 @@ Camera framing must resemble a fashion catalog / modeling reference shot, not a 
 
 If the reference image is cropped:
 
-Reconstruct missing body parts conservatively and realistically using the same outfit and proportions.
-
-Do NOT invent new shoes or footwear styles.
-
-If shoes are not visible in the reference, generate neutral, realistic continuation footwear that matches the existing outfit exactly and does not introduce new fashion elements.
+Reconstruct missing body parts conservatively and realistically using the same proportions.
 
 If the person is holding a phone or any object:
 
@@ -61,7 +57,10 @@ Maintain natural pores, realistic skin detail, and accurate proportions.
 
 Lighting and realism must match the full-body image.
 
-Clothing Requirements (ABSOLUTE RULE)
+`;
+
+  // Original clothing - preserves exact outfit from reference
+  private readonly CHARACTER_DIAGRAM_ORIGINAL = `Clothing Requirements (ABSOLUTE RULE)
 
 ALWAYS use the exact outfit from the reference image.
 
@@ -103,16 +102,68 @@ Never add accessories or props.
 
 Maintain a neutral, accurate, reference-grade presentation suitable for face-swap and identity consistency pipelines.`;
 
+  // Minimal clothing - for body proportion accuracy
+  private readonly CHARACTER_DIAGRAM_MINIMAL = `Clothing Requirements (BODY PROPORTION REFERENCE)
+
+Generate the subject wearing MINIMAL athletic/fitness wear to accurately show body proportions:
+
+- TOP: Plain sports bra or bikini top (solid neutral color - black, nude, or white)
+- BOTTOM: Plain fitted shorts or bikini bottom (matching the top)
+- FOOTWEAR: Bare feet preferred, or minimal neutral sandals if needed
+
+This is for professional body proportion reference - accurate body shape documentation is the purpose.
+
+Do NOT:
+- Add extra clothing, layers, or accessories
+- Cover or obscure body proportions
+- Add jewelry, watches, or props
+- Alter body proportions or shape from the reference
+
+The minimal clothing must be plain, neutral, and non-distracting.
+
+Footwear & Lower Body Rules
+
+Feet must always be visible in the full-body image.
+
+Bare feet preferred for proportion accuracy.
+
+No exaggerated proportions, floating feet, or AI-invented designs.
+
+Strict Rules
+
+Never crop or cut off the body at any point.
+
+Never add accessories, props, or extra clothing beyond the minimal athletic wear.
+
+Keep hair, face, and skin tone exactly matching the reference.
+
+Maintain a neutral, accurate, reference-grade presentation suitable for face-swap and identity consistency pipelines.`;
+
+  /**
+   * Get the full character diagram prompt based on clothing option
+   */
+  private getCharacterDiagramPrompt(clothingOption: 'original' | 'minimal' = 'original'): string {
+    const clothingSection = clothingOption === 'minimal'
+      ? this.CHARACTER_DIAGRAM_MINIMAL
+      : this.CHARACTER_DIAGRAM_ORIGINAL;
+    return this.CHARACTER_DIAGRAM_BASE + clothingSection;
+  }
+
   /**
    * Generate a character diagram from a source image
    * Uses Gemini's image generation capabilities (Nano Banana Pro)
+   * @param sourceImageUrl - URL of the source image
+   * @param clothingOption - 'original' keeps outfit from reference, 'minimal' for body proportions
    */
-  async generateCharacterDiagram(sourceImageUrl: string): Promise<CharacterDiagramResult> {
+  async generateCharacterDiagram(
+    sourceImageUrl: string,
+    clothingOption: 'original' | 'minimal' = 'original',
+  ): Promise<CharacterDiagramResult> {
     if (!this.ai) {
       throw new Error('Gemini API not configured');
     }
 
-    this.logger.log('Generating character diagram with Gemini (Nano Banana Pro)');
+    this.logger.log(`Generating character diagram with Gemini (Nano Banana Pro) - clothing: ${clothingOption}`);
 
     // Download the source image and convert to base64
     const imageData = await this.downloadImageAsBase64(sourceImageUrl);
@@ -125,11 +176,13 @@ Maintain a neutral, accurate, reference-grade presentation suitable for face-swa
       },
     };
 
+    const prompt = this.getCharacterDiagramPrompt(clothingOption);
+
     const contents = [
       {
         role: 'user',
         parts: [
-          { text: this.CHARACTER_DIAGRAM_PROMPT },
+          { text: prompt },
           {
             inlineData: {
               mimeType: imageData.mimeType,
@@ -431,6 +484,175 @@ Output: 2K resolution, photorealistic, highest quality.`;
       imageBase64,
       mimeType: imageMimeType,
     };
+  }
+
+  /**
+   * Generate a character diagram using multiple reference images
+   * This is the enhanced version that uses all available references for better identity preservation
+   *
+   * @param sourceImages - Array of reference images with quality scores and weights
+   * @param constrainedPrompt - Full prompt with identity constraints from PromptBuilderService
+   * @param aspectRatio - Output aspect ratio (default: 5:4 for character diagrams)
+   * @param imageSize - Output image size (default: 1K)
+   */
+  async generateWithMultipleReferences(
+    sourceImages: Array<{
+      url: string;
+      type: string;
+      qualityScore: number;
+      weight: number;
+    }>,
+    constrainedPrompt: string,
+    aspectRatio: '5:4' | '9:16' | '1:1' | '16:9' = '5:4',
+    imageSize: '1K' | '2K' = '1K',
+  ): Promise<CharacterDiagramResult> {
+    if (!this.ai) {
+      throw new Error('Gemini API not configured');
+    }
+
+    // Sort images by quality * weight, take top 5 (Gemini works best with 3-5 references)
+    const sortedImages = [...sourceImages]
+      .sort((a, b) => b.qualityScore * b.weight - a.qualityScore * a.weight)
+      .slice(0, 5);
+
+    this.logger.log(
+      `Generating with ${sortedImages.length} reference images (from ${sourceImages.length} provided)`,
+    );
+
+    // Download all images in parallel
+    const imageDataPromises = sortedImages.map((img) => this.downloadImageAsBase64(img.url));
+    const imageData = await Promise.all(imageDataPromises);
+
+    // Build image role descriptions for the prompt
+    const imageDescriptions = sortedImages
+      .map((img, i) => `Image ${i + 1}: ${img.type} (quality: ${(img.qualityScore * 100).toFixed(0)}%)`)
+      .join('\n');
+
+    // Build content parts: enhanced prompt + all reference images
+    const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [
+      {
+        text: `REFERENCE IMAGES PROVIDED:\n${imageDescriptions}\n\n${constrainedPrompt}`,
+      },
+    ];
+
+    // Add all reference images
+    for (const data of imageData) {
+      parts.push({
+        inlineData: {
+          mimeType: data.mimeType,
+          data: data.base64,
+        },
+      });
+    }
+
+    const config: GenerateContentConfig = {
+      responseModalities: ['IMAGE', 'TEXT'],
+      imageConfig: {
+        aspectRatio,
+        imageSize,
+      },
+    };
+
+    const contents = [
+      {
+        role: 'user',
+        parts,
+      },
+    ];
+
+    this.logger.log(`Calling Gemini with ${sortedImages.length} references...`);
+
+    const response = await this.ai.models.generateContentStream({
+      model: this.model,
+      config,
+      contents,
+    });
+
+    // Collect the streamed response
+    let imageBase64: string | null = null;
+    let imageMimeType: string | null = null;
+    const textResponses: string[] = [];
+    let blockedBySafety = false;
+    let finishReason: string | null = null;
+
+    for await (const chunk of response) {
+      const candidate = chunk.candidates?.[0];
+      if (candidate?.finishReason) {
+        finishReason = candidate.finishReason;
+        if (finishReason === 'SAFETY' || finishReason === 'IMAGE_SAFETY') {
+          blockedBySafety = true;
+          this.logger.warn(`Multi-reference generation blocked by safety: ${finishReason}`);
+        }
+      }
+
+      if (!candidate?.content?.parts) {
+        continue;
+      }
+
+      for (const part of candidate.content.parts) {
+        if (part && 'inlineData' in part && part.inlineData) {
+          imageBase64 = part.inlineData.data || null;
+          imageMimeType = part.inlineData.mimeType || null;
+          this.logger.log('Multi-reference image received from Gemini');
+        } else if (part && 'text' in part && part.text) {
+          textResponses.push(part.text);
+        }
+      }
+    }
+
+    if (blockedBySafety) {
+      throw new Error(`Generation blocked by safety filter (${finishReason})`);
+    }
+
+    if (!imageBase64 || !imageMimeType) {
+      const textSummary = textResponses.join(' ').slice(0, 500);
+      throw new Error(`No image generated. Response: ${textSummary || 'No response'}`);
+    }
+
+    this.logger.log('Multi-reference generation completed successfully');
+
+    return {
+      imageBase64,
+      mimeType: imageMimeType,
+    };
+  }
+
+  /**
+   * Analyze an image and return structured metadata
+   * Used by IdentityAnalysisService for profile extraction
+   *
+   * @param imageUrl - URL of the image to analyze
+   * @param analysisPrompt - Prompt requesting structured analysis
+   */
+  async analyzeImageStructured(
+    imageUrl: string,
+    analysisPrompt: string,
+  ): Promise<string> {
+    if (!this.ai) {
+      throw new Error('Gemini API not configured');
+    }
+
+    const imageData = await this.downloadImageAsBase64(imageUrl);
+
+    const response = await this.ai.models.generateContent({
+      model: 'gemini-2.0-flash', // Use flash for analysis (faster, cheaper)
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: analysisPrompt },
+            {
+              inlineData: {
+                mimeType: imageData.mimeType,
+                data: imageData.base64,
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    return response.text || '';
   }
 
   /**

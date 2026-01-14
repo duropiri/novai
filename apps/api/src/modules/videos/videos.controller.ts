@@ -20,9 +20,9 @@ class CreateVideoRequestDto {
   @IsNotEmpty()
   name!: string;
 
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  collectionId!: string;
+  collectionId?: string;
 
   @IsUrl()
   @IsNotEmpty()
@@ -83,9 +83,6 @@ export class VideosController {
     if (!dto.name?.trim()) {
       throw new HttpException('Name is required', HttpStatus.BAD_REQUEST);
     }
-    if (!dto.collectionId?.trim()) {
-      throw new HttpException('Collection ID is required', HttpStatus.BAD_REQUEST);
-    }
     if (!dto.fileUrl?.trim()) {
       throw new HttpException('File URL is required', HttpStatus.BAD_REQUEST);
     }
@@ -93,7 +90,7 @@ export class VideosController {
     try {
       return await this.videosService.create({
         name: dto.name.trim(),
-        collectionId: dto.collectionId.trim(),
+        collectionId: dto.collectionId?.trim() || null,
         fileUrl: dto.fileUrl.trim(),
         thumbnailUrl: dto.thumbnailUrl?.trim(),
         durationSeconds: dto.durationSeconds,

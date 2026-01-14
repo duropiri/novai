@@ -2,7 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { fal } from '@fal-ai/client';
 
-// fal.ai API types
+// fal.ai API types - Legacy FLUX Fast Training
 export interface FalLoraTrainingInput {
   images_data_url: string; // URL to ZIP file containing training images
   trigger_word?: string; // The trigger word for the LoRA (default: "ohwx")
@@ -19,6 +19,43 @@ export interface FalLoraTrainingOutput {
     file_name: string;
     file_size: number;
   };
+  config_file: {
+    url: string;
+    content_type: string;
+    file_name: string;
+    file_size: number;
+  };
+}
+
+// WAN 2.2 Image Trainer types
+export interface Wan22TrainingInput {
+  training_data_url: string; // URL to ZIP file containing training images
+  trigger_phrase: string; // The trigger phrase for the LoRA
+  steps?: number; // Training steps (default: 1000)
+  learning_rate?: number; // Learning rate (default: 0.0007)
+  is_style?: boolean; // Style mode vs character mode (default: false)
+  include_synthetic_captions?: boolean; // Use AI-generated captions (default: false)
+  use_face_detection?: boolean; // Auto-detect faces (default: true)
+  use_face_cropping?: boolean; // Crop to faces (default: false)
+  use_masks?: boolean; // Use segmentation masks (default: true)
+}
+
+export interface Wan22TrainingOutput {
+  // HIGH NOISE LoRA - PRIMARY for inference
+  high_noise_lora: {
+    url: string;
+    content_type: string;
+    file_name: string;
+    file_size: number;
+  };
+  // Diffusers format LoRA - reference only
+  diffusers_lora_file: {
+    url: string;
+    content_type: string;
+    file_name: string;
+    file_size: number;
+  };
+  // Config file - reference only
   config_file: {
     url: string;
     content_type: string;
@@ -352,6 +389,115 @@ export class FalService implements OnModuleInit {
     this.logger.error(`Request ID: ${requestId}`);
     this.logger.error(`Timed out after ${totalTime}s (${maxAttempts} attempts)`);
     throw new Error(`LoRA training timed out after ${maxAttempts} attempts (${totalTime}s)`);
+  }
+
+  // ============================================
+  // WAN 2.2 IMAGE TRAINER (New Primary Method)
+  // ============================================
+
+  /**
+   * Run WAN 2.2 LoRA training using fal.subscribe
+   * IMPORTANT: Returns high_noise_lora which should be used as the PRIMARY LoRA for inference
+   *
+   * @param input Training parameters
+   * @param options Progress callback and status update
+   * @returns Training output with high_noise_lora (primary), diffusers_lora_file, and config_file
+   */
+  async runWan22Training(
+    input: Wan22TrainingInput,
+    options: {
+      onQueueUpdate?: (update: { status: string; logs?: Array<{ message: string }> }) => void;
+      onProgress?: (progress: number) => void;
+    } = {},
+  ): Promise<Wan22TrainingOutput> {
+    this.logger.log('=== WAN 2.2 LORA TRAINING START ===');
+    this.logger.log(`Training data URL: ${input.training_data_url}`);
+    this.logger.log(`Trigger phrase: ${input.trigger_phrase}`);
+    this.logger.log(`Steps: ${input.steps || 1000}`);
+    this.logger.log(`Learning rate: ${input.learning_rate || 0.0007}`);
+    this.logger.log(`Is style: ${input.is_style || false}`);
+
+    try {
+      const result = await fal.subscribe('fal-ai/wan-22-image-trainer', {
+        input: {
+          training_data_url: input.training_data_url,
+          trigger_phrase: input.trigger_phrase,
+          steps: input.steps || 1000,
+          learning_rate: input.learning_rate || 0.0007,
+          is_style: input.is_style || false,
+          include_synthetic_captions: input.include_synthetic_captions || false,
+          use_face_detection: input.use_face_detection ?? true,
+          use_face_cropping: input.use_face_cropping || false,
+          use_masks: input.use_masks ?? true,
+        },
+        logs: true,
+        onQueueUpdate: (update) => {
+          this.logger.log(`WAN 2.2 queue status: ${update.status}`);
+
+          // Parse progress from logs
+          if (update.status === 'IN_PROGRESS' && 'logs' in update && update.logs?.length) {
+            const lastLog = update.logs[update.logs.length - 1]?.message || '';
+            const progress = this.parseTrainingProgress(lastLog);
+            if (progress !== null && options.onProgress) {
+              options.onProgress(progress);
+            }
+          }
+
+          if (options.onQueueUpdate) {
+            options.onQueueUpdate({
+              status: update.status,
+              logs: 'logs' in update ? update.logs : undefined,
+            });
+          }
+        },
+      });
+
+      this.logger.log('=== WAN 2.2 LORA TRAINING COMPLETED ===');
+
+      // Type assertion for the result
+      const typedResult = result.data as Wan22TrainingOutput;
+
+      // Validate result structure
+      if (!typedResult?.high_noise_lora?.url) {
+        this.logger.error(`WAN 2.2 result missing high_noise_lora: ${JSON.stringify(result)}`);
+        throw new Error('WAN 2.2 training did not return high_noise_lora');
+      }
+
+      this.logger.log(`[LoRA] Training complete`);
+      this.logger.log(`[LoRA] Primary LoRA (high noise): ${typedResult.high_noise_lora.url}`);
+      this.logger.log(`[LoRA] Diffusers LoRA (reference): ${typedResult.diffusers_lora_file?.url || 'N/A'}`);
+      this.logger.log(`[LoRA] Config (reference): ${typedResult.config_file?.url || 'N/A'}`);
+
+      return typedResult;
+    } catch (error) {
+      const originalError = error instanceof Error ? error : new Error(String(error));
+      const formattedError = this.formatNetworkError(originalError, 'WAN 2.2 training');
+
+      this.logger.error(`=== WAN 2.2 LORA TRAINING FAILED ===`);
+      this.logger.error(`Error: ${formattedError.message}`);
+      this.logger.error(`Stack: ${originalError.stack || ''}`);
+
+      throw formattedError;
+    }
+  }
+
+  /**
+   * Parse training progress from log messages
+   * Looks for patterns like "step 500/1000" or "Step: 500/1000"
+   */
+  private parseTrainingProgress(log: string): number | null {
+    if (!log) return null;
+
+    // Match patterns like "step 500/1000", "Step: 500 / 1000", etc.
+    const match = log.match(/step\s*:?\s*(\d+)\s*\/\s*(\d+)/i);
+    if (match) {
+      const current = parseInt(match[1], 10);
+      const total = parseInt(match[2], 10);
+      if (total > 0) {
+        return Math.round((current / total) * 100);
+      }
+    }
+    return null;
   }
 
   // ============================================

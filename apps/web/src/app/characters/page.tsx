@@ -2,34 +2,35 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { Upload, Trash2, Loader2, CheckCircle, XCircle, Clock, Download, ArrowRight, Plus, Pencil, Sparkles } from 'lucide-react';
+import { Upload, Trash2, Loader2, CheckCircle, XCircle, Clock, Download, ArrowRight, Plus, Pencil, Images, Shirt, User } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { useToast } from '@/components/ui/use-toast';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { characterApi, filesApi, loraApi, type CharacterDiagram, type LoraModel } from '@/lib/api';
+import { characterApi, filesApi, type CharacterDiagram } from '@/lib/api';
+import { MultiImageUploader, type UploadedImage } from '@/components/multi-image-uploader';
 
-type IdentitySource = 'photo' | 'lora';
+type ClothingOption = 'original' | 'minimal';
 
 export default function CharacterDiagramPage() {
   const { toast } = useToast();
 
   // Form state
-  const [identitySource, setIdentitySource] = useState<IdentitySource>('photo');
+  const [clothingOption, setClothingOption] = useState<ClothingOption>('original');
   const [name, setName] = useState('');
+  // Multi-image support
+  const [images, setImages] = useState<UploadedImage[]>([]);
+  const [primaryImageIndex, setPrimaryImageIndex] = useState(0);
+  // Legacy single file state for backward compatibility
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
-  const [selectedLora, setSelectedLora] = useState<LoraModel | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
 
   // Data state
-  const [loras, setLoras] = useState<LoraModel[]>([]);
-  const [isLoadingLoras, setIsLoadingLoras] = useState(true);
   const [diagrams, setDiagrams] = useState<CharacterDiagram[]>([]);
   const [isLoadingDiagrams, setIsLoadingDiagrams] = useState(true);
 
@@ -47,17 +48,6 @@ export default function CharacterDiagramPage() {
   const [isRenaming, setIsRenaming] = useState(false);
 
   // Fetch data
-  const fetchLoras = useCallback(async () => {
-    try {
-      const data = await loraApi.list('ready');
-      setLoras(data);
-    } catch (error) {
-      console.error('Failed to fetch LoRAs:', error);
-    } finally {
-      setIsLoadingLoras(false);
-    }
-  }, []);
-
   const fetchDiagrams = useCallback(async () => {
     try {
       const data = await characterApi.list();
@@ -70,11 +60,10 @@ export default function CharacterDiagramPage() {
   }, []);
 
   useEffect(() => {
-    fetchLoras();
     fetchDiagrams();
     const interval = setInterval(fetchDiagrams, 5000);
     return () => clearInterval(interval);
-  }, [fetchLoras, fetchDiagrams]);
+  }, [fetchDiagrams]);
 
   // Photo dropzone
   const onDrop = useCallback((acceptedFiles: File[]) => {
@@ -97,74 +86,65 @@ export default function CharacterDiagramPage() {
     setPreview(null);
   };
 
+  // Clear all images
+  const clearImages = () => {
+    images.forEach((img) => URL.revokeObjectURL(img.preview));
+    setImages([]);
+    setPrimaryImageIndex(0);
+  };
+
   // Submit handler
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (identitySource === 'photo') {
-      if (!file) {
-        toast({ title: 'Error', description: 'Please upload an image', variant: 'destructive' });
-        return;
+    if (images.length === 0) {
+      toast({ title: 'Error', description: 'Please upload at least one image', variant: 'destructive' });
+      return;
+    }
+
+    try {
+      setIsGenerating(true);
+      setIsUploading(true);
+
+      toast({ title: 'Uploading', description: `Uploading ${images.length} image(s)...` });
+
+      // Upload all images
+      const uploadedUrls: string[] = [];
+      const imageTypes: Record<number, string> = {};
+
+      for (let i = 0; i < images.length; i++) {
+        const img = images[i];
+        const result = await filesApi.uploadFile(img.file, 'character-images');
+        uploadedUrls.push(result.url);
+        imageTypes[i] = img.type;
       }
 
-      try {
-        setIsGenerating(true);
-        setIsUploading(true);
+      setIsUploading(false);
 
-        toast({ title: 'Uploading', description: 'Uploading source image...' });
-        const uploadResult = await filesApi.uploadFile(file, 'character-images');
-        setIsUploading(false);
+      toast({ title: 'Starting', description: 'Starting character diagram generation...' });
+      await characterApi.create({
+        name: name.trim() || undefined,
+        imageUrls: uploadedUrls,
+        primaryImageIndex,
+        imageTypes,
+        clothingOption,
+      });
 
-        toast({ title: 'Starting', description: 'Starting character diagram generation...' });
-        await characterApi.create({
-          name: name.trim() || undefined,
-          sourceImageUrl: uploadResult.url,
-        });
+      toast({
+        title: 'Success',
+        description: `Character diagram generation started with ${images.length} reference image(s)!`,
+      });
 
-        toast({
-          title: 'Success',
-          description: 'Character diagram generation started! This typically takes 30-60 seconds.',
-        });
-
-        setName('');
-        clearFile();
-        fetchDiagrams();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to create character diagram';
-        toast({ title: 'Error', description: message, variant: 'destructive' });
-      } finally {
-        setIsGenerating(false);
-        setIsUploading(false);
-      }
-    } else {
-      if (!selectedLora) {
-        toast({ title: 'Error', description: 'Please select a LoRA model', variant: 'destructive' });
-        return;
-      }
-
-      try {
-        setIsGenerating(true);
-
-        toast({ title: 'Starting', description: 'Generating reference image and character diagram...' });
-        await characterApi.createFromLora({
-          name: name.trim() || undefined,
-          loraId: selectedLora.id,
-        });
-
-        toast({
-          title: 'Success',
-          description: 'Character diagram generation started! This typically takes 1-2 minutes.',
-        });
-
-        setName('');
-        setSelectedLora(null);
-        fetchDiagrams();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to create character diagram';
-        toast({ title: 'Error', description: message, variant: 'destructive' });
-      } finally {
-        setIsGenerating(false);
-      }
+      setName('');
+      setClothingOption('original');
+      clearImages();
+      fetchDiagrams();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to create character diagram';
+      toast({ title: 'Error', description: message, variant: 'destructive' });
+    } finally {
+      setIsGenerating(false);
+      setIsUploading(false);
     }
   };
 
@@ -278,16 +258,22 @@ export default function CharacterDiagramPage() {
   };
 
   const getSourceBadge = (diagram: CharacterDiagram) => {
-    if (diagram.source_lora_id) {
-      return <Badge variant="secondary" className="text-xs"><Sparkles className="w-3 h-3 mr-1" />LoRA</Badge>;
-    }
     if (diagram.source_image_url) {
-      return <Badge variant="outline" className="text-xs">Photo</Badge>;
+      const imageCount = diagram.image_count || 1;
+      return (
+        <Badge variant="outline" className="text-xs">
+          {imageCount > 1 ? (
+            <><Images className="w-3 h-3 mr-1" />{imageCount} Photos</>
+          ) : (
+            'Photo'
+          )}
+        </Badge>
+      );
     }
     return <Badge variant="outline" className="text-xs">Uploaded</Badge>;
   };
 
-  const canSubmit = identitySource === 'photo' ? !!file : !!selectedLora;
+  const canSubmit = images.length > 0;
 
   return (
     <div className="space-y-6">
@@ -309,127 +295,75 @@ export default function CharacterDiagramPage() {
           </CardHeader>
           <CardContent>
             <form onSubmit={handleSubmit} className="space-y-6">
-              {/* Identity Source Toggle */}
-              <div className="space-y-3">
-                <Label>Identity Source</Label>
-                <RadioGroup
-                  value={identitySource}
-                  onValueChange={(v) => setIdentitySource(v as IdentitySource)}
-                  className="flex gap-4"
+              {/* Photo Upload - Multi-image */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label>Source Images</Label>
+                  <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                    <Images className="w-3 h-3" />
+                    <span>Multiple images improve identity consistency</span>
+                  </div>
+                </div>
+                <MultiImageUploader
+                  images={images}
+                  onChange={setImages}
+                  primaryIndex={primaryImageIndex}
+                  onPrimaryChange={setPrimaryImageIndex}
                   disabled={isGenerating}
-                >
-                  <div className="flex items-center space-x-2">
-                    <RadioGroupItem value="photo" id="photo" />
-                    <Label htmlFor="photo" className="cursor-pointer">Upload Photo</Label>
-                  </div>
-                  <div className="flex items-center space-x-2">
-                    <RadioGroupItem value="lora" id="lora" />
-                    <Label htmlFor="lora" className="cursor-pointer flex items-center gap-1">
-                      <Sparkles className="w-4 h-4" />
-                      Use Trained LoRA
-                    </Label>
-                  </div>
-                </RadioGroup>
+                  maxImages={6}
+                  minImages={1}
+                  imageTypes={['front', 'profile', '3/4 angle', 'full_body', 'expression', 'reference']}
+                />
               </div>
 
-              {/* Photo Upload */}
-              {identitySource === 'photo' && (
-                <div className="space-y-2">
-                  <Label>Source Image</Label>
-                  {!file ? (
-                    <div
-                      {...getRootProps()}
-                      className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
-                        isDragActive
-                          ? 'border-primary bg-primary/5'
-                          : 'border-muted-foreground/25 hover:border-primary/50'
-                      } ${isGenerating ? 'pointer-events-none opacity-50' : ''}`}
-                    >
-                      <input {...getInputProps()} />
-                      <Upload className="w-10 h-10 mx-auto mb-3 text-muted-foreground" />
-                      {isDragActive ? (
-                        <p>Drop the image here...</p>
-                      ) : (
-                        <p className="text-muted-foreground">
-                          Drag & drop an image, or click to select
-                        </p>
-                      )}
-                      <p className="text-xs text-muted-foreground mt-2">
-                        PNG, JPG, JPEG, or WebP
-                      </p>
+              {/* Clothing Option */}
+              <div className="space-y-3">
+                <Label>Clothing Style</Label>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setClothingOption('original')}
+                    disabled={isGenerating}
+                    className={`relative p-3 rounded-lg border-2 transition-all text-left ${
+                      clothingOption === 'original'
+                        ? 'border-primary bg-primary/5'
+                        : 'border-muted hover:border-muted-foreground/50'
+                    } ${isGenerating ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <Shirt className="w-4 h-4" />
+                      <span className="font-medium text-sm">Original Outfit</span>
                     </div>
-                  ) : (
-                    <div className="relative">
-                      <img
-                        src={preview!}
-                        alt="Preview"
-                        className="w-full max-h-64 object-contain rounded-lg border"
-                      />
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        size="icon"
-                        className="absolute top-2 right-2"
-                        onClick={clearFile}
-                        disabled={isGenerating}
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* LoRA Selection */}
-              {identitySource === 'lora' && (
-                <div className="space-y-2">
-                  <Label>Select LoRA</Label>
-                  {isLoadingLoras ? (
-                    <div className="flex items-center justify-center py-8">
-                      <Loader2 className="w-6 h-6 animate-spin" />
-                    </div>
-                  ) : loras.length === 0 ? (
-                    <div className="text-center py-6 text-muted-foreground border-2 border-dashed rounded-lg">
-                      <Sparkles className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                      <p>No LoRA models found</p>
-                      <p className="text-sm">Train or upload a LoRA model first</p>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-4 gap-2">
-                      {loras.map((lora) => (
-                        <button
-                          key={lora.id}
-                          type="button"
-                          onClick={() => setSelectedLora(lora)}
-                          disabled={isGenerating}
-                          className={`relative aspect-square rounded-md overflow-hidden border-2 transition-all ${
-                            selectedLora?.id === lora.id
-                              ? 'border-primary ring-2 ring-primary/50'
-                              : 'border-transparent hover:border-muted-foreground/50'
-                          } ${isGenerating ? 'opacity-50' : ''}`}
-                        >
-                          {lora.thumbnail_url ? (
-                            <img
-                              src={lora.thumbnail_url}
-                              alt={lora.name}
-                              className="w-full h-full object-cover"
-                            />
-                          ) : (
-                            <div className="w-full h-full bg-muted flex items-center justify-center">
-                              <Sparkles className="w-4 h-4 text-muted-foreground" />
-                            </div>
-                          )}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                  {selectedLora && (
-                    <p className="text-sm text-muted-foreground">
-                      Selected: <span className="font-medium">{selectedLora.name}</span>
+                    <p className="text-xs text-muted-foreground">
+                      Keep the exact clothing from the reference photo
                     </p>
-                  )}
+                    {clothingOption === 'original' && (
+                      <div className="absolute top-2 right-2 w-2 h-2 rounded-full bg-primary" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setClothingOption('minimal')}
+                    disabled={isGenerating}
+                    className={`relative p-3 rounded-lg border-2 transition-all text-left ${
+                      clothingOption === 'minimal'
+                        ? 'border-primary bg-primary/5'
+                        : 'border-muted hover:border-muted-foreground/50'
+                    } ${isGenerating ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <User className="w-4 h-4" />
+                      <span className="font-medium text-sm">Body Proportions</span>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Minimal athletic wear for accurate body reference
+                    </p>
+                    {clothingOption === 'minimal' && (
+                      <div className="absolute top-2 right-2 w-2 h-2 rounded-full bg-primary" />
+                    )}
+                  </button>
                 </div>
-              )}
+              </div>
 
               {/* Name field */}
               <div className="space-y-2">
@@ -448,7 +382,7 @@ export default function CharacterDiagramPage() {
 
               {/* Cost estimate */}
               <div className="p-3 bg-muted rounded-lg text-sm text-muted-foreground">
-                Estimated cost: ~${identitySource === 'lora' ? '0.05' : '0.02'} per diagram
+                Estimated cost: ~$0.02 per diagram
               </div>
 
               <Button type="submit" className="w-full" disabled={isGenerating || !canSubmit}>
@@ -458,10 +392,7 @@ export default function CharacterDiagramPage() {
                     {isUploading ? 'Uploading...' : 'Generating...'}
                   </>
                 ) : (
-                  <>
-                    <Sparkles className="w-4 h-4 mr-2" />
-                    Generate Character Diagram
-                  </>
+                  'Generate Character Diagram'
                 )}
               </Button>
             </form>

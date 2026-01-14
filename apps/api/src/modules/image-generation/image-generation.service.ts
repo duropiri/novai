@@ -107,7 +107,9 @@ export class ImageGenerationService {
       if (!lora) {
         throw new Error('LoRA model not found');
       }
-      if (lora.status !== 'ready' || !lora.weights_url) {
+      // Use lora_url (high_noise_lora) as primary, fallback to weights_url for backward compatibility
+      const loraUrl = lora.lora_url || lora.weights_url;
+      if (lora.status !== 'ready' || !loraUrl) {
         throw new Error('LoRA model is not ready');
       }
 
@@ -115,7 +117,7 @@ export class ImageGenerationService {
       referenceId = dto.loraId;
       jobPayload = {
         loraId: dto.loraId,
-        loraWeightsUrl: lora.weights_url,
+        loraWeightsUrl: loraUrl,
         loraTriggerWord: lora.trigger_word,
         prompt: dto.prompt,
         sourceImageUrl: dto.sourceImageUrl,

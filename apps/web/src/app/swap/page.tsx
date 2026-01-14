@@ -44,10 +44,13 @@ import {
   type LoraModel,
   type ReferenceKit,
   type Job,
+  type VideoStrategy,
 } from '@/lib/api';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { formatDuration } from '@/lib/video-utils';
 import {
   FaceUploadDropzone,
+  VideoUploadDropzone,
   VideoModelSelector,
   UpscaleSelector,
   SkeletonPreviewPanel,
@@ -58,16 +61,51 @@ import {
   type UpscaleResolution,
 } from './components';
 
+// Strategy definitions
+const STRATEGIES: { id: VideoStrategy; name: string; description: string; requiresLora: boolean; estimatedCostCents: number }[] = [
+  {
+    id: 'face_swap',
+    name: 'Direct Face Swap',
+    description: 'Fast frame-by-frame face swap. Best for preserving original motion.',
+    requiresLora: false,
+    estimatedCostCents: 45, // ~150 frames × $0.003
+  },
+  {
+    id: 'lora_generate',
+    name: 'LoRA Generation',
+    description: 'High quality AI video generation with trained identity.',
+    requiresLora: true,
+    estimatedCostCents: 10, // Gemini + video gen
+  },
+  {
+    id: 'video_lora',
+    name: 'Video-Trained LoRA',
+    description: 'Best quality. Trains on video frames for maximum identity preservation.',
+    requiresLora: false,
+    estimatedCostCents: 160, // Training + video gen
+  },
+  {
+    id: 'hybrid',
+    name: 'Hybrid (Generate + Refine)',
+    description: 'AI generation followed by face swap refinement.',
+    requiresLora: true,
+    estimatedCostCents: 100, // lora_generate + face_swap
+  },
+];
+
 // Cost constants (in cents)
 const GEMINI_COST = 2; // ~$0.02 for Gemini regeneration
-const POSE_DETECTION_COST = 1; // ~$0.01 per frame
+const FACE_SWAP_PER_FRAME = 0.3; // ~$0.003 per frame
 
 export default function AISwapperPage() {
   const { toast } = useToast();
 
   // === REQUIRED INPUTS (3-column layout) ===
   // Column 1: Source Video
+  type VideoSource = 'library' | 'upload';
+  const [videoSource, setVideoSource] = useState<VideoSource>('library');
   const [selectedVideo, setSelectedVideo] = useState<VideoType | null>(null);
+  const [uploadedVideo, setUploadedVideo] = useState<VideoType | null>(null);
 
   // Column 2: Target Face
   type FaceSource = 'upload' | 'diagram' | 'kit';
@@ -76,8 +114,11 @@ export default function AISwapperPage() {
   const [selectedDiagram, setSelectedDiagram] = useState<CharacterDiagram | null>(null);
   const [selectedReferenceKit, setSelectedReferenceKit] = useState<ReferenceKit | null>(null);
 
-  // Column 3: LoRA Model (REQUIRED)
+  // Column 3: LoRA Model (required for lora_generate and hybrid)
   const [selectedLora, setSelectedLora] = useState<LoraModel | null>(null);
+
+  // === STRATEGY SELECTION ===
+  const [strategy, setStrategy] = useState<VideoStrategy>('lora_generate');
 
   // === OPTIONS PANEL ===
   const [videoModel, setVideoModel] = useState<VideoModel>('kling');
@@ -194,12 +235,19 @@ export default function AISwapperPage() {
 
   // === COST CALCULATION ===
   const calculateEstimatedCost = useCallback(() => {
-    let total = GEMINI_COST;
-    total += keyFrameCount * POSE_DETECTION_COST;
-    total += getVideoModelCost(videoModel);
+    const selectedStrategy = STRATEGIES.find((s) => s.id === strategy);
+    let total = selectedStrategy?.estimatedCostCents || 0;
+
+    // Add video model cost for strategies that use it
+    if (strategy !== 'face_swap') {
+      total += getVideoModelCost(videoModel);
+    }
+
+    // Add upscaling cost
     total += getUpscaleCost(upscaleMethod);
+
     return total;
-  }, [keyFrameCount, videoModel, upscaleMethod]);
+  }, [strategy, videoModel, upscaleMethod]);
 
   const estimatedCostCents = calculateEstimatedCost();
   const estimatedCostDollars = (estimatedCostCents / 100).toFixed(2);
@@ -210,12 +258,18 @@ export default function AISwapperPage() {
     (faceSource === 'diagram' && selectedDiagram) ||
     (faceSource === 'kit' && selectedReferenceKit);
 
-  const canGenerate = selectedVideo && hasTargetFace && selectedLora && !isGenerating;
+  const selectedStrategy = STRATEGIES.find((s) => s.id === strategy);
+  const loraRequired = selectedStrategy?.requiresLora ?? false;
+  const hasLora = !loraRequired || selectedLora;
+
+  // Get the active video based on source type
+  const activeVideo = videoSource === 'library' ? selectedVideo : uploadedVideo;
+  const canGenerate = activeVideo && hasTargetFace && hasLora && !isGenerating;
 
   // === HANDLERS ===
   const handleGenerate = async () => {
-    if (!selectedVideo) {
-      toast({ title: 'Missing Selection', description: 'Please select a source video', variant: 'destructive' });
+    if (!activeVideo) {
+      toast({ title: 'Missing Selection', description: 'Please select or upload a source video', variant: 'destructive' });
       return;
     }
 
@@ -224,8 +278,8 @@ export default function AISwapperPage() {
       return;
     }
 
-    if (!selectedLora) {
-      toast({ title: 'Missing Selection', description: 'Please select a LoRA model', variant: 'destructive' });
+    if (loraRequired && !selectedLora) {
+      toast({ title: 'Missing Selection', description: `Please select a LoRA model for ${selectedStrategy?.name}`, variant: 'destructive' });
       return;
     }
 
@@ -237,16 +291,17 @@ export default function AISwapperPage() {
 
     try {
       const result = await swapApi.create({
-        videoId: selectedVideo.id,
+        videoId: activeVideo.id,
+        strategy,
         uploadedFaceUrl: faceSource === 'upload' ? uploadedFaceUrl || undefined : undefined,
         characterDiagramId: faceSource === 'diagram' ? selectedDiagram?.id : undefined,
         referenceKitId: faceSource === 'kit' ? selectedReferenceKit?.id : undefined,
-        loraId: selectedLora.id,
-        videoModel,
+        loraId: selectedLora?.id,
+        videoModel: strategy !== 'face_swap' ? videoModel : undefined,
         keepOriginalOutfit,
         upscaleMethod,
         upscaleResolution: upscaleMethod !== 'none' ? upscaleResolution : undefined,
-        keyFrameCount,
+        keyFrameCount: strategy === 'video_lora' ? keyFrameCount : undefined,
       });
 
       toast({
@@ -258,6 +313,7 @@ export default function AISwapperPage() {
 
       // Clear selections
       setSelectedVideo(null);
+      setUploadedVideo(null);
       setUploadedFaceUrl(null);
       setSelectedDiagram(null);
       setSelectedReferenceKit(null);
@@ -355,51 +411,85 @@ export default function AISwapperPage() {
             <CardDescription>The video to apply the face swap to</CardDescription>
           </CardHeader>
           <CardContent>
-            {isLoadingVideos ? (
-              <div className="flex items-center justify-center py-8">
-                <Loader2 className="w-6 h-6 animate-spin" />
-              </div>
-            ) : videos.length === 0 ? (
-              <div className="text-center py-8 text-muted-foreground">
-                <Video className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                <p className="text-sm">No source videos</p>
-                <p className="text-xs">Upload videos in Collections first</p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto">
-                {videos.map((video) => (
-                  <button
-                    key={video.id}
-                    onClick={() => setPreviewSourceVideo(video)}
-                    className={`relative aspect-video rounded-md overflow-hidden border-2 transition-all group ${
-                      selectedVideo?.id === video.id
-                        ? 'border-primary ring-2 ring-primary/50'
-                        : 'border-transparent hover:border-muted-foreground/50'
-                    }`}
-                  >
-                    {video.thumbnail_url ? (
-                      <img src={video.thumbnail_url} alt={video.name} className="w-full h-full object-cover" />
-                    ) : (
-                      <div className="w-full h-full bg-muted flex items-center justify-center">
-                        <Video className="w-6 h-6 text-muted-foreground" />
-                      </div>
-                    )}
-                    <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                      <Play className="w-6 h-6 text-white" />
-                    </div>
-                    <span className="absolute bottom-1 right-1 bg-black/70 text-white text-xs px-1 py-0.5 rounded">
-                      {formatDuration(video.duration_seconds)}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            )}
-            {selectedVideo && (
-              <div className="mt-3 p-2 bg-primary/5 border border-primary/20 rounded-md">
-                <p className="text-sm font-medium truncate">{selectedVideo.name}</p>
-                <p className="text-xs text-muted-foreground">{formatDuration(selectedVideo.duration_seconds)}</p>
-              </div>
-            )}
+            <Tabs value={videoSource} onValueChange={(v) => setVideoSource(v as VideoSource)}>
+              <TabsList className="grid w-full grid-cols-2">
+                <TabsTrigger value="library">
+                  <Video className="w-3 h-3 mr-1" />
+                  Library
+                </TabsTrigger>
+                <TabsTrigger value="upload">
+                  <Upload className="w-3 h-3 mr-1" />
+                  Upload
+                </TabsTrigger>
+              </TabsList>
+
+              {/* Library Tab */}
+              <TabsContent value="library" className="mt-3">
+                {isLoadingVideos ? (
+                  <div className="flex items-center justify-center py-8">
+                    <Loader2 className="w-6 h-6 animate-spin" />
+                  </div>
+                ) : videos.length === 0 ? (
+                  <div className="text-center py-8 text-muted-foreground">
+                    <Video className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                    <p className="text-sm">No source videos</p>
+                    <p className="text-xs">Upload videos in Collections first</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto">
+                    {videos.map((video) => (
+                      <button
+                        key={video.id}
+                        onClick={() => setPreviewSourceVideo(video)}
+                        className={`relative aspect-video rounded-md overflow-hidden border-2 transition-all group ${
+                          selectedVideo?.id === video.id
+                            ? 'border-primary ring-2 ring-primary/50'
+                            : 'border-transparent hover:border-muted-foreground/50'
+                        }`}
+                      >
+                        {video.thumbnail_url ? (
+                          <img src={video.thumbnail_url} alt={video.name} className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full bg-muted flex items-center justify-center">
+                            <Video className="w-6 h-6 text-muted-foreground" />
+                          </div>
+                        )}
+                        <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                          <Play className="w-6 h-6 text-white" />
+                        </div>
+                        <span className="absolute bottom-1 right-1 bg-black/70 text-white text-xs px-1 py-0.5 rounded">
+                          {formatDuration(video.duration_seconds)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {selectedVideo && (
+                  <div className="mt-3 p-2 bg-primary/5 border border-primary/20 rounded-md">
+                    <p className="text-sm font-medium truncate">{selectedVideo.name}</p>
+                    <p className="text-xs text-muted-foreground">{formatDuration(selectedVideo.duration_seconds)}</p>
+                  </div>
+                )}
+              </TabsContent>
+
+              {/* Upload Tab */}
+              <TabsContent value="upload" className="mt-3">
+                <VideoUploadDropzone
+                  onUpload={(video) => {
+                    setUploadedVideo(video);
+                    // Also refresh videos list so it appears in library
+                    fetchVideos();
+                  }}
+                  uploadedVideo={uploadedVideo}
+                  onClear={() => setUploadedVideo(null)}
+                />
+                {strategy === 'video_lora' && (
+                  <p className="text-xs text-muted-foreground mt-2">
+                    For Video-Trained LoRA, upload the video you want to train on.
+                  </p>
+                )}
+              </TabsContent>
+            </Tabs>
           </CardContent>
         </Card>
 
@@ -577,6 +667,48 @@ export default function AISwapperPage() {
         </Card>
       </div>
 
+      {/* === STRATEGY SELECTOR === */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-lg">Generation Strategy</CardTitle>
+          <CardDescription>Choose how the video should be processed</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <RadioGroup
+            value={strategy}
+            onValueChange={(v) => setStrategy(v as VideoStrategy)}
+            className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3"
+          >
+            {STRATEGIES.map((s) => (
+              <label
+                key={s.id}
+                className={`relative flex flex-col p-4 border rounded-lg cursor-pointer transition-all ${
+                  strategy === s.id
+                    ? 'border-primary bg-primary/5 ring-2 ring-primary/20'
+                    : 'border-muted hover:border-muted-foreground/50'
+                }`}
+              >
+                <div className="flex items-start gap-3">
+                  <RadioGroupItem value={s.id} className="mt-1" />
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-sm">{s.name}</span>
+                      {s.requiresLora && (
+                        <Badge variant="outline" className="text-xs">Requires LoRA</Badge>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1">{s.description}</p>
+                    <p className="text-xs text-muted-foreground mt-2">
+                      Est: ~${(s.estimatedCostCents / 100).toFixed(2)}
+                    </p>
+                  </div>
+                </div>
+              </label>
+            ))}
+          </RadioGroup>
+        </CardContent>
+      </Card>
+
       {/* === OPTIONS PANEL === */}
       <Card>
         <CardHeader className="pb-3">
@@ -584,11 +716,13 @@ export default function AISwapperPage() {
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-            {/* Video Model */}
+            {/* Video Model - hide for face_swap strategy */}
+            {strategy !== 'face_swap' && (
             <div>
               <Label className="text-sm font-medium mb-2 block">Video Model</Label>
               <VideoModelSelector selected={videoModel} onSelect={setVideoModel} />
             </div>
+            )}
 
             {/* Upscaling */}
             <div>
@@ -670,11 +804,11 @@ export default function AISwapperPage() {
                 <div className="flex items-center gap-1 text-sm text-muted-foreground">
                   <AlertCircle className="w-4 h-4" />
                   <span>
-                    {!selectedVideo
-                      ? 'Select a video'
+                    {!activeVideo
+                      ? videoSource === 'library' ? 'Select a video' : 'Upload a video'
                       : !hasTargetFace
                       ? 'Provide a target face'
-                      : !selectedLora
+                      : loraRequired && !selectedLora
                       ? 'Select a LoRA model'
                       : ''}
                   </span>
