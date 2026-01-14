@@ -887,6 +887,7 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
 
   /**
    * Add a log entry without updating progress
+   * Consolidates similar/duplicate messages to keep logs clean
    */
   private async addLog(jobId: string, message: string): Promise<void> {
     const timestamp = new Date().toLocaleTimeString();
@@ -896,10 +897,60 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
     const existingPayload = (currentJob?.output_payload as Record<string, unknown>) || {};
     const existingLogs = (existingPayload.logs as string[]) || [];
 
+    // Extract base message pattern for consolidation
+    // Matches patterns like "[KLING] submitted (50%)" -> "[KLING] submitted"
+    // Or "Status: IN_PROGRESS" type messages
+    const getBasePattern = (msg: string): string => {
+      // Remove timestamp prefix
+      const withoutTimestamp = msg.replace(/^\[\d{1,2}:\d{2}:\d{2}\s*(AM|PM)?\]\s*/i, '');
+      // Remove percentage patterns like "(50%)" or "50%"
+      const withoutPercent = withoutTimestamp.replace(/\s*\(?\d+%\)?/g, '');
+      // Remove "Poll X:" patterns
+      const withoutPoll = withoutPercent.replace(/Poll \d+:\s*/g, '');
+      return withoutPoll.trim();
+    };
+
+    const newBasePattern = getBasePattern(logMessage);
+    let updatedLogs = [...existingLogs];
+    let shouldAdd = true;
+
+    // Check if this is a status update that should consolidate with the last similar message
+    if (existingLogs.length > 0) {
+      const lastLog = existingLogs[existingLogs.length - 1];
+      const lastBasePattern = getBasePattern(lastLog);
+
+      // If same base pattern, update the last entry instead of adding new
+      if (lastBasePattern === newBasePattern && newBasePattern.length > 5) {
+        // Check if this is a progress update (contains percentage)
+        const hasProgress = /\d+%/.test(message);
+        if (hasProgress) {
+          // Update the last log with new progress
+          updatedLogs[updatedLogs.length - 1] = logMessage;
+          shouldAdd = false;
+        }
+      }
+
+      // Also consolidate exact duplicates (ignoring timestamp)
+      const messageWithoutTime = logMessage.replace(/^\[\d{1,2}:\d{2}:\d{2}\s*(AM|PM)?\]\s*/i, '');
+      const lastWithoutTime = lastLog.replace(/^\[\d{1,2}:\d{2}:\d{2}\s*(AM|PM)?\]\s*/i, '');
+      if (messageWithoutTime === lastWithoutTime) {
+        shouldAdd = false; // Skip exact duplicate
+      }
+    }
+
+    if (shouldAdd) {
+      updatedLogs.push(logMessage);
+    }
+
+    // Keep only last 50 logs to prevent payload from growing too large
+    if (updatedLogs.length > 50) {
+      updatedLogs = updatedLogs.slice(-50);
+    }
+
     await this.supabase.updateJob(jobId, {
       output_payload: {
         ...existingPayload,
-        logs: [...existingLogs, logMessage],
+        logs: updatedLogs,
       },
     });
     this.logger.log(`[${jobId}] Log: ${message}`);
