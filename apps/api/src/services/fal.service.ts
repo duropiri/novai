@@ -970,10 +970,72 @@ export class FalService implements OnModuleInit {
   }
 
   // ============================================
-  // FLUX LORA IMAGE GENERATION
+  // NANO BANANA IMAGE GENERATION (Primary)
   // ============================================
 
   /**
+   * Run Nano Banana (Gemini 2.5 Flash Image) generation via fal.ai
+   * This is the primary image generation method - fast, high quality, $0.039/image
+   * Does not use LoRAs - for character consistency, use with face swap
+   */
+  async runNanoBananaGeneration(input: {
+    prompt: string;
+    num_images?: number;
+    aspect_ratio?: '21:9' | '16:9' | '3:2' | '4:3' | '5:4' | '1:1' | '4:5' | '3:4' | '2:3' | '9:16';
+    output_format?: 'jpeg' | 'png' | 'webp';
+    onProgress?: (status: { status: string }) => void;
+  }): Promise<{ images: Array<{ url: string; width: number; height: number }> }> {
+    this.logger.log('Running Nano Banana image generation via fal.ai');
+    this.logger.log(`Prompt: ${input.prompt.substring(0, 100)}...`);
+
+    try {
+      const result = await fal.subscribe('fal-ai/nano-banana', {
+        input: {
+          prompt: input.prompt,
+          num_images: input.num_images ?? 1,
+          aspect_ratio: input.aspect_ratio ?? '1:1',
+          output_format: input.output_format ?? 'jpeg',
+        },
+        logs: true,
+        onQueueUpdate: (update) => {
+          this.logger.log(`Nano Banana queue status: ${update.status}`);
+          if (input.onProgress) {
+            input.onProgress({ status: update.status });
+          }
+        },
+      });
+
+      this.logger.log('Nano Banana generation completed');
+
+      // Type assertion for the result - Nano Banana returns images with url, width, height
+      const typedResult = result.data as unknown as {
+        images: Array<{ url: string; width: number; height: number; content_type?: string }>;
+      };
+
+      if (!typedResult?.images?.length) {
+        throw new Error('Nano Banana returned no images');
+      }
+
+      return {
+        images: typedResult.images.map((img) => ({
+          url: img.url,
+          width: img.width || 1024,
+          height: img.height || 1024,
+        })),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Nano Banana generation failed: ${message}`);
+      throw error;
+    }
+  }
+
+  // ============================================
+  // FLUX LORA IMAGE GENERATION (Legacy - use Nano Banana instead)
+  // ============================================
+
+  /**
+   * @deprecated Use runNanoBananaGeneration + face swap instead
    * Run FLUX LoRA image generation using fal.ai client
    * Generates images using a trained LoRA model
    */

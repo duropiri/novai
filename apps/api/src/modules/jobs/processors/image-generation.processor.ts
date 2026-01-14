@@ -235,47 +235,120 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
         }
 
         result = { images: generatedImages };
-      } else if (mode === 'text-to-image' && loraWeightsUrl && loraTriggerWord) {
-        // Text-to-image mode: generate from prompt
+      } else if (mode === 'text-to-image' && loraTriggerWord) {
+        // Text-to-image mode: Generate with Nano Banana + Face Swap
+        // This approach works with ANY LoRA trainer (WAN 2.2, FLUX, etc.)
         if (!prompt) {
           throw new Error('Prompt is required for text-to-image mode');
         }
 
-        // Check if this is a WAN 2.2 trained LoRA (video LoRA, not compatible with FLUX)
-        if (loraTrainer === 'wan-22') {
-          throw new Error(
-            'This LoRA was trained with WAN 2.2 (video trainer) and cannot be used for text-to-image generation. ' +
-            'WAN 2.2 LoRAs are designed for video generation only. ' +
-            'Please use a FLUX-trained LoRA, or use face-swap mode with a source image.'
-          );
-        }
+        this.logger.log(`Text-to-image mode using Nano Banana + Face Swap`);
+        this.logger.log(`Trigger word: ${loraTriggerWord}, Prompt: ${prompt.substring(0, 50)}...`);
 
-        const fullPrompt = `${loraTriggerWord} ${prompt}`;
-
-        // Map aspect ratio to image size
-        const aspectRatioToSize: Record<string, { width: number; height: number }> = {
-          '1:1': { width: 1024, height: 1024 },
-          '16:9': { width: 1344, height: 768 },
-          '9:16': { width: 768, height: 1344 },
-          '4:5': { width: 896, height: 1120 },
-          '3:4': { width: 896, height: 1152 },
+        // Map aspect ratio for Nano Banana
+        const aspectRatioMap: Record<string, '21:9' | '16:9' | '3:2' | '4:3' | '5:4' | '1:1' | '4:5' | '3:4' | '2:3' | '9:16'> = {
+          '1:1': '1:1',
+          '16:9': '16:9',
+          '9:16': '9:16',
+          '4:5': '4:5',
+          '3:4': '3:4',
         };
 
-        result = await this.falService.runFluxLoraGeneration({
-          prompt: fullPrompt,
-          lora_url: loraWeightsUrl,
-          lora_scale: loraStrength ?? 0.8,
-          image_size: (aspectRatio && aspectRatioToSize[aspectRatio]) ?? { width: 1024, height: 1024 },
+        await this.supabase.updateJob(jobId, { progress: 10, external_status: 'GENERATING_BASE' });
+
+        // Step 1: Generate base images with Nano Banana (without the trigger word - it's not a LoRA)
+        const baseResult = await this.falService.runNanoBananaGeneration({
+          prompt: prompt,
           num_images: numImages,
+          aspect_ratio: aspectRatioMap[aspectRatio || '9:16'] || '9:16',
           onProgress: async (status) => {
             if (status.status === 'IN_PROGRESS') {
-              await this.supabase.updateJob(jobId, {
-                progress: 50,
-                external_status: status.status,
-              });
+              await this.supabase.updateJob(jobId, { progress: 30, external_status: 'GENERATING_BASE' });
             }
           },
         });
+
+        if (!baseResult.images || baseResult.images.length === 0) {
+          throw new Error('Nano Banana returned no images');
+        }
+
+        this.logger.log(`Generated ${baseResult.images.length} base images with Nano Banana`);
+        await this.supabase.updateJob(jobId, { progress: 50, external_status: 'GENERATING_REFERENCE' });
+
+        // Step 2: Generate a reference face from the LoRA for face swap
+        // Use FLUX for this since we need the LoRA identity
+        let referenceFaceUrl: string;
+
+        if (characterDiagramUrl) {
+          // If we have a character diagram, use it as the reference face
+          referenceFaceUrl = characterDiagramUrl;
+          this.logger.log(`Using character diagram as reference face: ${referenceFaceUrl}`);
+        } else if (anchorFaceUrl) {
+          // If we have a reference kit anchor face, use it
+          referenceFaceUrl = anchorFaceUrl;
+          this.logger.log(`Using reference kit anchor face: ${referenceFaceUrl}`);
+        } else if (loraWeightsUrl && loraTrainer !== 'wan-22') {
+          // For FLUX-trained LoRAs only, generate a reference face
+          const facePrompt = `${loraTriggerWord} portrait photo, face closeup, looking at camera, neutral expression, plain background, high quality`;
+          const faceResult = await this.falService.runFluxLoraGeneration({
+            prompt: facePrompt,
+            lora_url: loraWeightsUrl,
+            lora_scale: loraStrength ?? 0.8,
+            image_size: { width: 512, height: 512 },
+            num_images: 1,
+          });
+
+          if (!faceResult.images || faceResult.images.length === 0) {
+            throw new Error('Failed to generate reference face from LoRA');
+          }
+          referenceFaceUrl = faceResult.images[0].url;
+          this.logger.log(`Generated reference face from FLUX LoRA: ${referenceFaceUrl}`);
+        } else {
+          // For WAN 2.2 LoRAs without a character diagram, we can't generate images
+          throw new Error(
+            'WAN 2.2 LoRAs require a Character Diagram or Reference Kit for image generation. ' +
+            'Please create a Character Diagram first, then use it for image generation.'
+          );
+        }
+
+        await this.supabase.updateJob(jobId, { progress: 60, external_status: 'SWAPPING_FACES' });
+
+        // Step 3: Face swap the reference face onto each base image
+        const generatedImages: Array<{ url: string; width: number; height: number }> = [];
+
+        for (let i = 0; i < baseResult.images.length; i++) {
+          const baseImage = baseResult.images[i];
+          this.logger.log(`Face swap ${i + 1}/${baseResult.images.length}`);
+
+          try {
+            const swapResult = await this.falService.runFaceSwap({
+              base_image_url: baseImage.url,
+              swap_image_url: referenceFaceUrl,
+            });
+
+            if (swapResult.image) {
+              generatedImages.push({
+                url: swapResult.image.url,
+                width: swapResult.image.width,
+                height: swapResult.image.height,
+              });
+            } else {
+              // Face swap failed, keep original
+              this.logger.warn(`Face swap failed for image ${i + 1}, keeping original`);
+              generatedImages.push(baseImage);
+            }
+          } catch (swapError) {
+            this.logger.warn(`Face swap error for image ${i + 1}: ${swapError}, keeping original`);
+            generatedImages.push(baseImage);
+          }
+
+          await this.supabase.updateJob(jobId, {
+            progress: 60 + Math.floor((i + 1) / baseResult.images.length * 30),
+            external_status: 'SWAPPING_FACES',
+          });
+        }
+
+        result = { images: generatedImages };
       } else {
         throw new Error(`Invalid mode or missing required data: ${mode}`);
       }
