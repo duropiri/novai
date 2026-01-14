@@ -13,6 +13,8 @@ interface ImageGenerationJobData {
   loraWeightsUrl?: string;
   loraTriggerWord?: string;
   loraStrength?: number;
+  loraTrainer?: string; // 'flux-fast' | 'wan-22' | 'manual' | 'imported'
+  loraTrainingImagesUrl?: string; // For WAN 2.2 fallback
   // Character Diagram mode fields
   characterDiagramId?: string;
   characterDiagramUrl?: string;
@@ -71,6 +73,8 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
       loraWeightsUrl,
       loraTriggerWord,
       loraStrength,
+      loraTrainer,
+      loraTrainingImagesUrl,
       characterDiagramId,
       characterDiagramUrl,
       referenceKitId,
@@ -235,6 +239,15 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
         // Text-to-image mode: generate from prompt
         if (!prompt) {
           throw new Error('Prompt is required for text-to-image mode');
+        }
+
+        // Check if this is a WAN 2.2 trained LoRA (video LoRA, not compatible with FLUX)
+        if (loraTrainer === 'wan-22') {
+          throw new Error(
+            'This LoRA was trained with WAN 2.2 (video trainer) and cannot be used for text-to-image generation. ' +
+            'WAN 2.2 LoRAs are designed for video generation only. ' +
+            'Please use a FLUX-trained LoRA, or use face-swap mode with a source image.'
+          );
         }
 
         const fullPrompt = `${loraTriggerWord} ${prompt}`;

@@ -113,12 +113,29 @@ export class ImageGenerationService {
         throw new Error('LoRA model is not ready');
       }
 
+      // Check if this is a WAN 2.2 trained LoRA (video LoRA, not compatible with FLUX image generation)
+      if (lora.trainer === 'wan-22') {
+        // WAN 2.2 LoRAs are for video generation, not compatible with FLUX image generation
+        // For text-to-image, we need a FLUX-trained LoRA
+        // For face-swap, we can still use face swap with training images
+        if (!dto.sourceImageUrl) {
+          throw new Error(
+            `LoRA "${lora.name}" was trained with WAN 2.2 (video trainer) and cannot be used for text-to-image generation. ` +
+            `Please use a FLUX-trained LoRA for image generation, or provide a source image to use face swap mode.`
+          );
+        }
+        // For face swap mode with WAN 2.2 LoRA, we'll use a different approach
+        this.logger.warn(`Using WAN 2.2 LoRA "${lora.name}" in face-swap mode - will use training images for reference`);
+      }
+
       mode = dto.sourceImageUrl ? 'face-swap' : 'text-to-image';
       referenceId = dto.loraId;
       jobPayload = {
         loraId: dto.loraId,
         loraWeightsUrl: loraUrl,
         loraTriggerWord: lora.trigger_word,
+        loraTrainer: lora.trainer, // Pass trainer type for processor logic
+        loraTrainingImagesUrl: lora.training_images_url, // For WAN 2.2 fallback
         prompt: dto.prompt,
         sourceImageUrl: dto.sourceImageUrl,
         aspectRatio: dto.aspectRatio,
