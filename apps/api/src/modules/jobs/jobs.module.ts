@@ -11,6 +11,7 @@ import { ReferenceKitProcessor } from './processors/reference-kit.processor';
 import { FilesModule } from '../files/files.module';
 import { FalService } from '../../services/fal.service';
 import { GeminiService } from '../../services/gemini.service';
+import { KlingService } from '../../services/kling.service';
 import { PicsiService } from '../../services/picsi.service';
 import { LocalAIService } from '../../services/local-ai.service';
 import { QUEUES } from './queues.constants';
@@ -34,6 +35,7 @@ export { QUEUES } from './queues.constants';
     JobsService,
     FalService,
     GeminiService,
+    KlingService,
     PicsiService,
     LocalAIService,
     LoraProcessor,

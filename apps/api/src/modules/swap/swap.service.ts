@@ -14,7 +14,7 @@ export interface CreateFaceSwapDto {
   // LoRA model - REQUIRED for advanced pipeline
   loraId: string;
   // Video generation model
-  videoModel: 'kling' | 'luma' | 'sora2pro' | 'wan';
+  videoModel: 'kling' | 'kling-2.5' | 'kling-2.6' | 'luma' | 'sora2pro' | 'wan';
   // Processing options
   keepOriginalOutfit: boolean;
   // Upscaling options
@@ -36,11 +36,14 @@ const GEMINI_COST = 2; // ~$0.02 for Gemini frame regeneration
 const POSE_DETECTION_COST = 1; // ~$0.01 per frame for DWPose
 
 // Video model costs (in cents) - approximate for 5 second video
+// Direct Kling API is ~50% cheaper than fal.ai
 const VIDEO_MODEL_COSTS: Record<string, number> = {
-  kling: 40,  // Kling v2.6 Pro ~$0.40/5s
-  luma: 100,  // Luma Dream Machine ~$1.00/5s (premium)
-  sora2pro: 100, // Sora 2 Pro ~$1.00/5s (premium)
-  wan: 20,    // WAN v2.2 ~$0.20/5s (fast)
+  kling: 8,       // Kling v1.6 Direct ~$0.08/5s (recommended)
+  'kling-2.5': 12, // Kling v2.5 Direct ~$0.12/5s (cinematic)
+  'kling-2.6': 20, // Kling v2.6 Direct ~$0.20/5s (with audio)
+  luma: 100,      // Luma Dream Machine ~$1.00/5s (premium)
+  sora2pro: 100,  // Sora 2 Pro ~$1.00/5s (premium)
+  wan: 5,         // WAN v2.2 ~$0.05/5s (fast/cheap)
 };
 
 // Upscaling costs (in cents)

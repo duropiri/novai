@@ -739,7 +739,9 @@ export default function AISwapperPage() {
 
                 // Model display name mapping
                 const modelDisplayNames: Record<string, string> = {
-                  kling: 'Kling',
+                  kling: 'Kling 1.6',
+                  'kling-2.5': 'Kling 2.5',
+                  'kling-2.6': 'Kling 2.6',
                   luma: 'Luma',
                   sora2pro: 'Sora 2 Pro',
                   wan: 'WAN',

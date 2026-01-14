@@ -648,7 +648,7 @@ export interface CreateFaceSwapRequest {
   // LoRA model - REQUIRED for advanced pipeline
   loraId: string;
   // Video generation model
-  videoModel: 'kling' | 'luma' | 'sora2pro' | 'wan';
+  videoModel: 'kling' | 'kling-2.5' | 'kling-2.6' | 'luma' | 'sora2pro' | 'wan';
   // Processing options
   keepOriginalOutfit: boolean;
   // Upscaling options

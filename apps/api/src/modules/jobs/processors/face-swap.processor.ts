@@ -5,6 +5,7 @@ import { QUEUES } from '../queues.constants';
 import { JobsService } from '../jobs.service';
 import { FalService } from '../../../services/fal.service';
 import { GeminiService } from '../../../services/gemini.service';
+import { KlingService } from '../../../services/kling.service';
 import { LocalAIService } from '../../../services/local-ai.service';
 import { SupabaseService } from '../../files/supabase.service';
 
@@ -27,7 +28,7 @@ interface AdvancedSwapJobData {
   loraTriggerWord?: string;
   // Video settings
   durationSeconds: number;
-  videoModel: 'kling' | 'luma' | 'sora2pro' | 'wan';
+  videoModel: 'kling' | 'kling-2.5' | 'kling-2.6' | 'luma' | 'sora2pro' | 'wan';
   // Processing options
   keepOriginalOutfit: boolean;
   upscaleMethod: 'real-esrgan' | 'clarity' | 'creative' | 'none';
@@ -54,6 +55,7 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
     private readonly jobsService: JobsService,
     private readonly falService: FalService,
     private readonly geminiService: GeminiService,
+    private readonly klingService: KlingService,
     private readonly localAIService: LocalAIService,
     private readonly supabase: SupabaseService,
   ) {
@@ -442,19 +444,153 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
             timeoutPromise,
           ]);
           break;
+        case 'kling-2.5':
+          // Kling 2.5 - Higher quality, cinematic
+          // Try direct API first, fall back to fal.ai on failure
+          if (this.klingService.isEnabled()) {
+            try {
+              actualModelUsed = 'kling-2.5';
+              await this.addLog(jobId, `Starting Direct Kling v2.5 (50% cheaper than fal.ai)...`);
+              videoResult = await Promise.race([
+                this.klingService.generateVideoWithMotion({
+                  imageUrl: primaryFrameUrl,
+                  motionVideoUrl: videoUrl,
+                  model: 'kling-v2-5',
+                  duration: durationSeconds >= 10 ? '10' : '5',
+                  onProgress: async (status) => {
+                    await this.addLog(jobId, `[KLING-2.5] ${status.status} (${status.progress || 0}%)`);
+                  },
+                }),
+                timeoutPromise,
+              ]);
+            } catch (directKlingError) {
+              const errMsg = directKlingError instanceof Error ? directKlingError.message : String(directKlingError);
+              this.logger.warn(`[${jobId}] Direct Kling failed: ${errMsg}, falling back to fal.ai`);
+              await this.addLog(jobId, `Direct Kling failed (${errMsg}), using fal.ai fallback...`);
+              actualModelUsed = 'kling';
+              videoResult = await Promise.race([
+                this.falService.runKlingMotionControl({
+                  image_url: primaryFrameUrl,
+                  video_url: videoUrl,
+                  character_orientation: 'video',
+                  onProgress: onFalProgress,
+                }),
+                timeoutPromise,
+              ]);
+            }
+          } else {
+            // Direct API not configured, use fal.ai
+            actualModelUsed = 'kling';
+            await this.addLog(jobId, `Starting Kling via fal.ai (direct API not configured)...`);
+            videoResult = await Promise.race([
+              this.falService.runKlingMotionControl({
+                image_url: primaryFrameUrl,
+                video_url: videoUrl,
+                character_orientation: 'video',
+                onProgress: onFalProgress,
+              }),
+              timeoutPromise,
+            ]);
+          }
+          break;
+        case 'kling-2.6':
+          // Kling 2.6 - Includes audio generation!
+          // Try direct API first, fall back to fal.ai on failure
+          if (this.klingService.isEnabled()) {
+            try {
+              actualModelUsed = 'kling-2.6';
+              await this.addLog(jobId, `Starting Direct Kling v2.6 with audio generation...`);
+              videoResult = await Promise.race([
+                this.klingService.generateVideoWithMotion({
+                  imageUrl: primaryFrameUrl,
+                  motionVideoUrl: videoUrl,
+                  model: 'kling-v2-6',
+                  duration: durationSeconds >= 10 ? '10' : '5',
+                  onProgress: async (status) => {
+                    await this.addLog(jobId, `[KLING-2.6] ${status.status} (${status.progress || 0}%)`);
+                  },
+                }),
+                timeoutPromise,
+              ]);
+            } catch (directKlingError) {
+              const errMsg = directKlingError instanceof Error ? directKlingError.message : String(directKlingError);
+              this.logger.warn(`[${jobId}] Direct Kling failed: ${errMsg}, falling back to fal.ai`);
+              await this.addLog(jobId, `Direct Kling failed (${errMsg}), using fal.ai fallback...`);
+              actualModelUsed = 'kling';
+              videoResult = await Promise.race([
+                this.falService.runKlingMotionControl({
+                  image_url: primaryFrameUrl,
+                  video_url: videoUrl,
+                  character_orientation: 'video',
+                  onProgress: onFalProgress,
+                }),
+                timeoutPromise,
+              ]);
+            }
+          } else {
+            // Direct API not configured, use fal.ai
+            actualModelUsed = 'kling';
+            await this.addLog(jobId, `Starting Kling via fal.ai (direct API not configured)...`);
+            videoResult = await Promise.race([
+              this.falService.runKlingMotionControl({
+                image_url: primaryFrameUrl,
+                video_url: videoUrl,
+                character_orientation: 'video',
+                onProgress: onFalProgress,
+              }),
+              timeoutPromise,
+            ]);
+          }
+          break;
         case 'kling':
         default:
-          actualModelUsed = 'kling';
-          await this.addLog(jobId, `Starting Kling v2.6 motion control...`);
-          videoResult = await Promise.race([
-            this.falService.runKlingMotionControl({
-              image_url: primaryFrameUrl,
-              video_url: videoUrl,
-              character_orientation: 'video',
-              onProgress: onFalProgress,
-            }),
-            timeoutPromise,
-          ]);
+          // Kling 1.6 - Best balance of quality and cost
+          // Try direct API first, fall back to fal.ai on failure
+          if (this.klingService.isEnabled()) {
+            try {
+              actualModelUsed = 'kling';
+              await this.addLog(jobId, `Starting Direct Kling v1.6 (50% cheaper than fal.ai)...`);
+              videoResult = await Promise.race([
+                this.klingService.generateVideoWithMotion({
+                  imageUrl: primaryFrameUrl,
+                  motionVideoUrl: videoUrl,
+                  model: 'kling-v1-6',
+                  duration: durationSeconds >= 10 ? '10' : '5',
+                  onProgress: async (status) => {
+                    await this.addLog(jobId, `[KLING] ${status.status} (${status.progress || 0}%)`);
+                  },
+                }),
+                timeoutPromise,
+              ]);
+            } catch (directKlingError) {
+              const errMsg = directKlingError instanceof Error ? directKlingError.message : String(directKlingError);
+              this.logger.warn(`[${jobId}] Direct Kling failed: ${errMsg}, falling back to fal.ai`);
+              await this.addLog(jobId, `Direct Kling failed (${errMsg}), using fal.ai fallback...`);
+              actualModelUsed = 'kling';
+              videoResult = await Promise.race([
+                this.falService.runKlingMotionControl({
+                  image_url: primaryFrameUrl,
+                  video_url: videoUrl,
+                  character_orientation: 'video',
+                  onProgress: onFalProgress,
+                }),
+                timeoutPromise,
+              ]);
+            }
+          } else {
+            // Direct API not configured, use fal.ai
+            actualModelUsed = 'kling';
+            await this.addLog(jobId, `Starting Kling via fal.ai...`);
+            videoResult = await Promise.race([
+              this.falService.runKlingMotionControl({
+                image_url: primaryFrameUrl,
+                video_url: videoUrl,
+                character_orientation: 'video',
+                onProgress: onFalProgress,
+              }),
+              timeoutPromise,
+            ]);
+          }
           break;
       }
 
@@ -484,10 +620,94 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
         await this.updateProgress(jobId, 87, `Upscaling to ${upscaleResolution}...`);
         this.logger.log(`[${jobId}] Stage 4: Upscaling with ${upscaleMethod} to ${upscaleResolution}`);
         // TODO: Implement full video upscaling pipeline
-        await this.updateProgress(jobId, 95, 'Upscaling complete');
+        await this.updateProgress(jobId, 90, 'Upscaling complete');
       } else {
-        await this.updateProgress(jobId, 95, 'Skipping upscaling');
+        await this.updateProgress(jobId, 90, 'Skipping upscaling');
       }
+
+      // ========================================
+      // STAGE 4.5: Merge Original Audio (90-95%)
+      // ========================================
+      await this.updateProgress(jobId, 91, 'Extracting audio from original video...');
+      this.logger.log(`[${jobId}] Stage 4.5: Merging original audio`);
+
+      try {
+        // Download original video to extract audio
+        const originalVideoBuffer = await this.downloadBuffer(videoUrl);
+        const originalVideoPath = path.join(tempDir, 'original_video.mp4');
+        const extractedAudioPath = path.join(tempDir, 'extracted_audio.aac');
+        const generatedVideoPath = path.join(tempDir, 'generated_video.mp4');
+        const mergedVideoPath = path.join(tempDir, 'merged_with_audio.mp4');
+
+        await fs.writeFile(originalVideoPath, originalVideoBuffer);
+
+        // Check if original video has audio
+        const { stdout: audioCheck } = await execAsync(
+          `ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of csv=p=0 "${originalVideoPath}"`,
+        ).catch(() => ({ stdout: '' }));
+
+        const hasAudio = audioCheck.trim() === 'audio';
+        this.logger.log(`[${jobId}] Original video has audio: ${hasAudio}`);
+
+        if (hasAudio) {
+          await this.updateProgress(jobId, 92, 'Merging audio with generated video...');
+
+          // Extract audio from original video
+          await execAsync(
+            `ffmpeg -i "${originalVideoPath}" -vn -acodec aac -b:a 128k -y "${extractedAudioPath}"`,
+          );
+          this.logger.log(`[${jobId}] Audio extracted successfully`);
+
+          // Download generated video
+          const generatedVideoBuffer = await this.downloadBuffer(finalVideoUrl);
+          await fs.writeFile(generatedVideoPath, generatedVideoBuffer);
+
+          // Get durations to handle length mismatch
+          const { stdout: genDuration } = await execAsync(
+            `ffprobe -v error -show_entries format=duration -of csv=p=0 "${generatedVideoPath}"`,
+          );
+          const { stdout: audioDuration } = await execAsync(
+            `ffprobe -v error -show_entries format=duration -of csv=p=0 "${extractedAudioPath}"`,
+          );
+
+          const genDur = parseFloat(genDuration.trim()) || 5;
+          const audDur = parseFloat(audioDuration.trim()) || 5;
+          this.logger.log(`[${jobId}] Generated video duration: ${genDur}s, Audio duration: ${audDur}s`);
+
+          // Merge audio with generated video
+          // Use -shortest to cut audio if longer than video
+          // Use -t to limit to generated video duration
+          await execAsync(
+            `ffmpeg -i "${generatedVideoPath}" -i "${extractedAudioPath}" -c:v copy -c:a aac -b:a 128k -map 0:v:0 -map 1:a:0 -shortest -t ${genDur} -y "${mergedVideoPath}"`,
+          );
+
+          // Update finalVideoUrl to point to local merged file
+          const mergedBuffer = await fs.readFile(mergedVideoPath);
+
+          // Upload merged video temporarily to get URL
+          const mergedPath = `${videoId}/merged_${Date.now()}.mp4`;
+          const { url: mergedUrl } = await this.supabase.uploadFile(
+            'processed-videos',
+            mergedPath,
+            mergedBuffer,
+            'video/mp4',
+          );
+
+          finalVideoUrl = mergedUrl;
+          this.logger.log(`[${jobId}] Audio merged successfully: ${finalVideoUrl}`);
+          await this.addLog(jobId, 'Original audio merged with generated video');
+        } else {
+          this.logger.log(`[${jobId}] No audio in original video, skipping audio merge`);
+          await this.addLog(jobId, 'No audio in original video');
+        }
+      } catch (audioError) {
+        const audioErrorMsg = audioError instanceof Error ? audioError.message : String(audioError);
+        this.logger.warn(`[${jobId}] Audio merge failed (continuing without audio): ${audioErrorMsg}`);
+        await this.addLog(jobId, `Audio merge skipped: ${audioErrorMsg}`);
+        // Continue without audio - don't fail the job
+      }
+
+      await this.updateProgress(jobId, 95, 'Audio processing complete');
 
       // ========================================
       // STAGE 5: Finalize (95-100%)
