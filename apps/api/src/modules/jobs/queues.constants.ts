@@ -5,6 +5,7 @@ export const QUEUES = {
   IMAGE_GENERATION: 'image-generation',
   VARIANT: 'variant',
   REFERENCE_KIT: 'reference-kit',
+  EMOTION_BOARD: 'emotion-board',
 } as const;
 
 export type QueueName = (typeof QUEUES)[keyof typeof QUEUES];

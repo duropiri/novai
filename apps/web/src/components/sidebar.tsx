@@ -22,6 +22,8 @@ import {
   ChevronRight,
   Sparkles,
   DollarSign,
+  Smile,
+  Smartphone,
 } from 'lucide-react';
 
 // Main navigation items
@@ -31,6 +33,8 @@ const toolsNavigation = [
   { name: 'Image Generator', href: '/image-generator', icon: ImagePlus },
   { name: 'Character Diagrams', href: '/characters', icon: Wand2 },
   { name: 'Reference Kits', href: '/reference-kits', icon: Users },
+  { name: 'Emotion Boards', href: '/emotion-board', icon: Smile },
+  { name: 'Phone Scan', href: '/scan', icon: Smartphone },
   { name: 'AI Swapper', href: '/swap', icon: Video },
   { name: 'Variant Generator', href: '/variants', icon: Layers },
 ];

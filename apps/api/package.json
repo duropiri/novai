@@ -19,6 +19,8 @@
     "@nestjs/config": "^3.2.2",
     "@nestjs/core": "^10.3.8",
     "@nestjs/platform-express": "^10.3.8",
+    "@nestjs/platform-socket.io": "^10.4.22",
+    "@nestjs/websockets": "^10.4.22",
     "@novai/shared": "*",
     "@supabase/supabase-js": "^2.43.0",
     "@types/fluent-ffmpeg": "^2.1.28",
@@ -31,7 +33,8 @@
     "jsonwebtoken": "^9.0.3",
     "openai": "^6.16.0",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "socket.io": "^4.8.3"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.3.2",

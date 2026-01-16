@@ -448,4 +448,113 @@ export class FFmpegService {
       buffer[2] === 0x4E &&
       buffer[3] === 0x47;
   }
+
+  /**
+   * Assemble emotion grid from cell images with labels
+   * Creates a 2xN grid where each cell has an image and a label below it
+   *
+   * @param cells - Array of cell data with image URL and label
+   * @param columns - Number of columns (typically 2)
+   * @param uploadPrefix - Upload path prefix
+   * @returns URL of the assembled grid image
+   */
+  async assembleEmotionGrid(
+    cells: Array<{ url: string; label: string }>,
+    columns: number,
+    uploadPrefix: string,
+  ): Promise<string> {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ffmpeg-grid-'));
+
+    try {
+      const cellSize = 512; // Each cell image size
+      const labelHeight = 48; // Height of label bar
+      const cellWithLabel = cellSize + labelHeight; // Total cell height
+      const fontSize = 24;
+      const rows = Math.ceil(cells.length / columns);
+
+      this.logger.log(`Assembling ${cells.length} cells into ${columns}x${rows} grid`);
+
+      // Download all cell images
+      const cellPaths: string[] = [];
+      for (let i = 0; i < cells.length; i++) {
+        const cellPath = path.join(tempDir, `cell_${i}.png`);
+        await this.downloadImageAsPng(cells[i].url, cellPath);
+        cellPaths.push(cellPath);
+      }
+
+      // Create labeled cells (image + white bar with black text)
+      const labeledCellPaths: string[] = [];
+      for (let i = 0; i < cells.length; i++) {
+        const labeledPath = path.join(tempDir, `labeled_${i}.png`);
+        const label = cells[i].label;
+
+        // Create cell with label using ffmpeg
+        // 1. Scale image to cellSize x cellSize
+        // 2. Add white padding at bottom for label
+        // 3. Draw text on the padding
+        const cmd = `ffmpeg -i "${cellPaths[i]}" -vf "scale=${cellSize}:${cellSize}:force_original_aspect_ratio=decrease,pad=${cellSize}:${cellSize}:(ow-iw)/2:(oh-ih)/2:white,pad=${cellSize}:${cellWithLabel}:0:0:white,drawtext=text='${label}':fontsize=${fontSize}:fontcolor=black:x=(w-text_w)/2:y=${cellSize}+(${labelHeight}-text_h)/2" -y "${labeledPath}"`;
+
+        await execAsync(cmd);
+        labeledCellPaths.push(labeledPath);
+      }
+
+      // Assemble grid using ffmpeg
+      // Build complex filter for stacking rows
+      const outputPath = path.join(tempDir, 'grid.jpg');
+
+      // If we have fewer cells than expected for a complete grid, pad with empty cells
+      while (labeledCellPaths.length < rows * columns) {
+        // Create empty white cell
+        const emptyPath = path.join(tempDir, `empty_${labeledCellPaths.length}.png`);
+        await execAsync(
+          `ffmpeg -f lavfi -i color=c=white:s=${cellSize}x${cellWithLabel}:d=1 -frames:v 1 -y "${emptyPath}"`,
+        );
+        labeledCellPaths.push(emptyPath);
+      }
+
+      // Build ffmpeg filter_complex for grid assembly
+      // Each row: hstack the cells
+      // Final: vstack all rows
+      let inputs = '';
+      let filterComplex = '';
+      const rowOutputs: string[] = [];
+
+      for (let i = 0; i < labeledCellPaths.length; i++) {
+        inputs += ` -i "${labeledCellPaths[i]}"`;
+      }
+
+      // Create rows by hstacking
+      for (let row = 0; row < rows; row++) {
+        const startIdx = row * columns;
+        let rowInputs = '';
+        for (let col = 0; col < columns; col++) {
+          rowInputs += `[${startIdx + col}:v]`;
+        }
+        const rowOutput = `row${row}`;
+        filterComplex += `${rowInputs}hstack=inputs=${columns}[${rowOutput}];`;
+        rowOutputs.push(`[${rowOutput}]`);
+      }
+
+      // Stack all rows vertically
+      filterComplex += `${rowOutputs.join('')}vstack=inputs=${rows}[out]`;
+
+      const gridCmd = `ffmpeg${inputs} -filter_complex "${filterComplex}" -map "[out]" -q:v 2 -y "${outputPath}"`;
+      await execAsync(gridCmd);
+
+      // Upload grid
+      const gridBuffer = await fs.readFile(outputPath);
+      const uploadPath = `${uploadPrefix}/grid_${Date.now()}.jpg`;
+      const { url } = await this.supabase.uploadFile(
+        'emotion-boards',
+        uploadPath,
+        gridBuffer,
+        'image/jpeg',
+      );
+
+      this.logger.log(`Emotion grid assembled and uploaded: ${url}`);
+      return url;
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
 }

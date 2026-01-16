@@ -81,12 +81,25 @@ export function FaceSelector({
 
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
+  // Check if any URLs are blob URLs (browser-local, not accessible by server)
+  const hasBlobUrls = imageUrls.some((url) => url.startsWith('blob:'));
+
   // Process images for face detection
   const processFaces = useCallback(async () => {
     if (imageUrls.length === 0) {
       toast({
         title: 'Error',
         description: 'No images to process',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    // Check for blob URLs - these can't be accessed by the server
+    if (hasBlobUrls) {
+      toast({
+        title: 'Images Not Uploaded',
+        description: 'Face detection requires uploaded images. Start training first, then detect faces.',
         variant: 'destructive',
       });
       return;
@@ -194,7 +207,7 @@ export function FaceSelector({
     } finally {
       setIsProcessing(false);
     }
-  }, [mode, loraId, imageUrls, API_URL, onFaceProcessed, onPrimarySelected, toast]);
+  }, [mode, loraId, imageUrls, hasBlobUrls, API_URL, onFaceProcessed, onPrimarySelected, toast]);
 
   // Set primary identity/cluster
   const selectCluster = useCallback(async (clusterIndex: number) => {
@@ -373,13 +386,19 @@ export function FaceSelector({
         </div>
         <Button
           onClick={processFaces}
-          disabled={disabled || isProcessing || imageUrls.length === 0}
+          disabled={disabled || isProcessing || imageUrls.length === 0 || hasBlobUrls}
           size="sm"
+          title={hasBlobUrls ? 'Upload images first to enable face detection' : undefined}
         >
           {isProcessing ? (
             <>
               <Loader2 className="w-4 h-4 mr-2 animate-spin" />
               Detecting Faces...
+            </>
+          ) : hasBlobUrls ? (
+            <>
+              <AlertCircle className="w-4 h-4 mr-2" />
+              Upload First
             </>
           ) : (
             <>

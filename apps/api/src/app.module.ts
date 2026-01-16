@@ -17,6 +17,8 @@ import { SettingsModule } from './modules/settings/settings.module';
 import { ImageCollectionsModule } from './modules/image-collections/image-collections.module';
 import { ReferenceKitModule } from './modules/reference-kit/reference-kit.module';
 import { FacesModule } from './modules/faces/faces.module';
+import { EmotionBoardModule } from './modules/emotion-board/emotion-board.module';
+import { ScanModule } from './modules/scan/scan.module';
 import { HealthController } from './health.controller';
 
 @Module({
@@ -52,6 +54,8 @@ import { HealthController } from './health.controller';
     ImageCollectionsModule,
     ReferenceKitModule,
     FacesModule,
+    EmotionBoardModule,
+    ScanModule,
   ],
   controllers: [HealthController],
 })

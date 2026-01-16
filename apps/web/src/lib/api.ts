@@ -1113,3 +1113,220 @@ export const referenceKitApi = {
       method: 'POST',
     }),
 };
+
+// ==================== Emotion Board API ====================
+
+export interface EmotionBoard {
+  id: string;
+  name: string | null;
+  status: 'pending' | 'generating' | 'ready' | 'failed';
+  source_type: 'image' | 'lora' | 'video' | 'zip' | 'character' | 'reference_kit';
+  source_image_url: string | null;
+  lora_id: string | null;
+  character_diagram_id: string | null;
+  reference_kit_id: string | null;
+  grid_size: '2x4' | '2x8';
+  emotions: string[];
+  board_url: string | null;
+  cell_urls: Record<string, string> | null;
+  progress: number;
+  error_message: string | null;
+  cost_cents: number | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface CreateEmotionBoardRequest {
+  name?: string;
+  sourceType: 'image' | 'lora' | 'video' | 'zip' | 'character' | 'reference_kit';
+  sourceImageUrl?: string;
+  loraId?: string;
+  characterDiagramId?: string;
+  referenceKitId?: string;
+  gridSize?: '2x4' | '2x8';
+  emotions?: string[];
+}
+
+export interface EmotionBoardResult {
+  id: string;
+  status: string;
+  estimatedCost: number;
+}
+
+// Standard 8 emotions for 2x4 grid
+export const STANDARD_EMOTIONS = [
+  'Happy', 'Sad',
+  'Angry', 'Surprised',
+  'Disgusted', 'Fearful',
+  'Neutral', 'Contempt',
+];
+
+// Extended 16 emotions for 2x8 grid
+export const EXTENDED_EMOTIONS = [
+  ...STANDARD_EMOTIONS,
+  'Excited', 'Confused',
+  'Proud', 'Embarrassed',
+  'Hopeful', 'Bored',
+  'Amused', 'Thoughtful',
+];
+
+export const emotionBoardApi = {
+  list: () => fetchApiSilent<EmotionBoard[]>('/emotion-board', []),
+
+  get: (id: string) => fetchApi<EmotionBoard>(`/emotion-board/${id}`),
+
+  getEmotions: () =>
+    fetchApiSilent<{ standard: string[]; extended: string[] }>('/emotion-board/emotions', {
+      standard: STANDARD_EMOTIONS,
+      extended: EXTENDED_EMOTIONS,
+    }),
+
+  create: (data: CreateEmotionBoardRequest) =>
+    fetchApi<EmotionBoardResult>('/emotion-board', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  delete: (id: string) =>
+    fetchApi<void>(`/emotion-board/${id}`, {
+      method: 'DELETE',
+    }),
+};
+
+// ==================== Phone Scan API ====================
+
+export interface ScanSession {
+  id: string;
+  session_code: string;
+  session_secret: string;
+  status: 'pending' | 'connected' | 'scanning' | 'completed' | 'expired';
+  desktop_connected_at: string | null;
+  phone_connected_at: string | null;
+  last_heartbeat_at: string | null;
+  target_angles: string[];
+  auto_capture_enabled: boolean;
+  captured_angles: Record<string, { url: string; quality: number }>;
+  total_captures: number;
+  name: string | null;
+  expires_at: string;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface ScanCapture {
+  id: string;
+  session_id: string;
+  image_url: string;
+  thumbnail_url: string | null;
+  detected_angle: string | null;
+  euler_angles: { pitch: number; yaw: number; roll: number } | null;
+  quality_score: number | null;
+  blur_score: number | null;
+  face_confidence: number | null;
+  bbox: { x: number; y: number; w: number; h: number } | null;
+  is_selected: boolean;
+  is_auto_captured: boolean;
+  captured_at: string;
+}
+
+export interface CreateScanSessionRequest {
+  name?: string;
+  targetAngles?: string[];
+  autoCaptureEnabled?: boolean;
+  expiryMinutes?: number;
+}
+
+export interface CreateScanCaptureRequest {
+  imageBase64: string;
+  detectedAngle?: string;
+  eulerAngles?: { pitch: number; yaw: number; roll: number };
+  qualityScore?: number;
+  blurScore?: number;
+  faceConfidence?: number;
+  bbox?: { x: number; y: number; w: number; h: number };
+  isAutoCaptured?: boolean;
+}
+
+// Default target angles for scanning
+export const DEFAULT_SCAN_ANGLES = [
+  'front',
+  'profile_left',
+  'profile_right',
+  'quarter_left',
+  'quarter_right',
+  'up',
+  'down',
+  'smile',
+];
+
+// Angle display names
+export const ANGLE_DISPLAY_NAMES: Record<string, string> = {
+  front: 'Front',
+  profile_left: 'Left Profile',
+  profile_right: 'Right Profile',
+  quarter_left: '3/4 Left',
+  quarter_right: '3/4 Right',
+  up: 'Looking Up',
+  down: 'Looking Down',
+  smile: 'Smile',
+};
+
+export const scanApi = {
+  // Session management
+  createSession: (data: CreateScanSessionRequest = {}) =>
+    fetchApi<ScanSession>('/scan/sessions', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  getSession: (id: string) =>
+    fetchApi<{ session: ScanSession; captures: ScanCapture[] }>(`/scan/sessions/${id}`),
+
+  getSessionByCode: (code: string) =>
+    fetchApi<ScanSession>(`/scan/sessions/code/${code}`),
+
+  completeSession: (id: string) =>
+    fetchApi<ScanSession>(`/scan/sessions/${id}/complete`, {
+      method: 'POST',
+    }),
+
+  deleteSession: (id: string) =>
+    fetchApi<void>(`/scan/sessions/${id}`, {
+      method: 'DELETE',
+    }),
+
+  listSessions: () => fetchApiSilent<ScanSession[]>('/scan/sessions', []),
+
+  // Capture management
+  addCapture: (sessionId: string, data: CreateScanCaptureRequest) =>
+    fetchApi<ScanCapture>(`/scan/sessions/${sessionId}/captures`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  toggleCaptureSelection: (captureId: string, isSelected: boolean) =>
+    fetchApi<void>(`/scan/captures/${captureId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ isSelected }),
+    }),
+
+  deleteCapture: (captureId: string) =>
+    fetchApi<void>(`/scan/captures/${captureId}`, {
+      method: 'DELETE',
+    }),
+
+  getSelectedCaptures: (sessionId: string) =>
+    fetchApi<ScanCapture[]>(`/scan/sessions/${sessionId}/selected`),
+
+  // Helper to generate QR code URL for a session
+  getSessionUrl: (sessionCode: string) => {
+    const baseUrl = typeof window !== 'undefined' ? window.location.origin : '';
+    return `${baseUrl}/scan/mobile?code=${sessionCode}`;
+  },
+
+  // Helper to get WebSocket URL
+  getWebSocketUrl: () => {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+    return apiUrl.replace('http://', 'ws://').replace('https://', 'wss://');
+  },
+};
