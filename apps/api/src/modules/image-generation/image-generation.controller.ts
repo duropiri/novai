@@ -25,6 +25,10 @@ class CreateImageGenerationDto {
 
   @IsString()
   @IsOptional()
+  referenceKitId?: string;
+
+  @IsString()
+  @IsOptional()
   prompt?: string;
 
   @IsString()
@@ -69,18 +73,27 @@ export class ImageGenerationController {
 
     const hasLora = !!dto.loraId?.trim();
     const hasDiagram = !!dto.characterDiagramId?.trim();
+    const hasReferenceKit = !!dto.referenceKitId?.trim();
 
-    // Must select either LoRA or Character Diagram, not both
-    if (hasLora && hasDiagram) {
-      throw new HttpException('Select either LoRA or Character Diagram, not both', HttpStatus.BAD_REQUEST);
+    // Count how many identity sources are selected
+    const identitySourceCount = [hasLora, hasDiagram, hasReferenceKit].filter(Boolean).length;
+
+    // Must select exactly one identity source
+    if (identitySourceCount > 1) {
+      throw new HttpException('Select only one: LoRA, Character Diagram, or Reference Kit', HttpStatus.BAD_REQUEST);
     }
-    if (!hasLora && !hasDiagram) {
-      throw new HttpException('Select a LoRA model or Character Diagram', HttpStatus.BAD_REQUEST);
+    if (identitySourceCount === 0) {
+      throw new HttpException('Select a LoRA model, Character Diagram, or Reference Kit', HttpStatus.BAD_REQUEST);
     }
 
-    // Character Diagram mode requires source image (face swap only)
+    // Character Diagram mode requires source image (face swap only - no generation)
     if (hasDiagram && !dto.sourceImageUrl?.trim()) {
       throw new HttpException('Source image is required when using Character Diagram', HttpStatus.BAD_REQUEST);
+    }
+
+    // Reference Kit mode needs either prompt (text-to-image) or source image (face swap)
+    if (hasReferenceKit && !dto.prompt?.trim() && !dto.sourceImageUrl?.trim()) {
+      throw new HttpException('Either prompt or source image is required when using Reference Kit', HttpStatus.BAD_REQUEST);
     }
 
     // LoRA mode needs either prompt or source image
@@ -92,6 +105,7 @@ export class ImageGenerationController {
       const result = await this.imageGenService.createImageGeneration({
         loraId: dto.loraId?.trim(),
         characterDiagramId: dto.characterDiagramId?.trim(),
+        referenceKitId: dto.referenceKitId?.trim(),
         prompt: dto.prompt?.trim(),
         sourceImageUrl: dto.sourceImageUrl?.trim(),
         aspectRatio: dto.aspectRatio,

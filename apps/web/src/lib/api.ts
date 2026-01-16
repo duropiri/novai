@@ -712,6 +712,7 @@ export interface CreateFaceSwapRequest {
   strategy?: VideoStrategy;
   // Target face - at least one required
   uploadedFaceUrl?: string;
+  additionalReferenceUrls?: string[]; // Additional face images for better identity consistency
   characterDiagramId?: string;
   referenceKitId?: string;
   // LoRA model - required for lora_generate and hybrid strategies

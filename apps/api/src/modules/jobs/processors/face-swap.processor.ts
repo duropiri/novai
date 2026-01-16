@@ -60,7 +60,13 @@ class JobTimeoutError extends Error {
   }
 }
 
-@Processor(QUEUES.FACE_SWAP)
+@Processor(QUEUES.FACE_SWAP, {
+  // Long-running jobs need extended lock duration (5 minutes)
+  // Default is 30 seconds, which is too short for frame uploads
+  lockDuration: 300000,
+  // Renew lock every 2.5 minutes to prevent expiration during long operations
+  lockRenewTime: 150000,
+})
 export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
   private readonly logger = new Logger(FaceSwapProcessor.name);
 
@@ -1579,10 +1585,14 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
       // ========================================
       // STAGE 4: Reassemble refined video (90-95%)
       // ========================================
-      await this.updateProgress(jobId, 92, 'Reassembling refined video...');
+      await this.updateProgress(jobId, 91, 'Extracting audio from original video...');
 
-      // Extract audio from generated video
-      const audioUrl = await this.ffmpegService.extractAudio(generatedVideo.video.url, `${uploadPrefix}/audio`);
+      // Extract audio from ORIGINAL source video (not the generated video)
+      // AI-generated videos typically don't have audio, so we preserve the original
+      const audioUrl = await this.ffmpegService.extractAudio(videoUrl, `${uploadPrefix}/audio`);
+      this.logger.log(`[${jobId}] Original audio extracted: ${audioUrl || 'no audio'}`);
+
+      await this.updateProgress(jobId, 93, 'Reassembling refined video with original audio...');
 
       const refinedVideoUrl = await this.ffmpegService.assembleFrames(
         refinedFrameUrls,
@@ -1590,7 +1600,7 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
         `${uploadPrefix}/final`,
       );
 
-      await this.updateProgress(jobId, 95, 'Video assembled');
+      await this.updateProgress(jobId, 95, 'Video assembled with audio');
 
       // ========================================
       // STAGE 5: Finalize (95-100%)

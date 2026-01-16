@@ -4,6 +4,7 @@ import { Job } from 'bullmq';
 import { QUEUES } from '../queues.constants';
 import { JobsService } from '../jobs.service';
 import { FalService } from '../../../services/fal.service';
+import { GeminiService } from '../../../services/gemini.service';
 import { SupabaseService } from '../../files/supabase.service';
 
 interface ImageGenerationJobData {
@@ -38,6 +39,7 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
   constructor(
     private readonly jobsService: JobsService,
     private readonly falService: FalService,
+    private readonly geminiService: GeminiService,
     private readonly supabase: SupabaseService,
   ) {
     super();
@@ -173,6 +175,77 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
         }
 
         result = { images: generatedImages };
+      } else if (mode === 'reference-kit-swap' && anchorFaceUrl && prompt && !sourceImageUrl) {
+        // Reference Kit text-to-image mode: generate with Nano Banana, then face swap with anchor face
+        this.logger.log(`Reference Kit text-to-image mode: Nano Banana + face swap with anchor face`);
+        this.logger.log(`Prompt: ${prompt.substring(0, 50)}...`);
+        this.logger.log(`Anchor face: ${anchorFaceUrl}`);
+
+        // Map aspect ratio for Nano Banana
+        const aspectRatioMap: Record<string, '21:9' | '16:9' | '3:2' | '4:3' | '5:4' | '1:1' | '4:5' | '3:4' | '2:3' | '9:16'> = {
+          '1:1': '1:1',
+          '16:9': '16:9',
+          '9:16': '9:16',
+          '4:5': '4:5',
+          '3:4': '3:4',
+        };
+
+        await this.supabase.updateJob(jobId, { progress: 10, external_status: 'GENERATING_BASE' });
+
+        // Step 1: Generate base images with Nano Banana (Direct Gemini API)
+        const baseResult = await this.geminiService.runNanoBananaGeneration({
+          prompt: prompt,
+          num_images: numImages,
+          aspect_ratio: aspectRatioMap[aspectRatio || '9:16'] || '9:16',
+          onProgress: async (status) => {
+            if (status.status === 'IN_PROGRESS') {
+              await this.supabase.updateJob(jobId, { progress: 30, external_status: 'GENERATING_BASE' });
+            }
+          },
+        });
+
+        if (!baseResult.images || baseResult.images.length === 0) {
+          throw new Error('Nano Banana (Gemini) returned no images');
+        }
+
+        this.logger.log(`Generated ${baseResult.images.length} base images with Nano Banana (Gemini)`);
+        await this.supabase.updateJob(jobId, { progress: 50, external_status: 'SWAPPING_FACES' });
+
+        // Step 2: Face swap anchor face onto each base image
+        const generatedImages: Array<{ url: string; width: number; height: number }> = [];
+
+        for (let i = 0; i < baseResult.images.length; i++) {
+          const baseImage = baseResult.images[i];
+          this.logger.log(`Face swap ${i + 1}/${baseResult.images.length} using Reference Kit anchor face`);
+
+          try {
+            const swapResult = await this.falService.runFaceSwap({
+              base_image_url: baseImage.url,
+              swap_image_url: anchorFaceUrl,
+            });
+
+            if (swapResult.image) {
+              generatedImages.push({
+                url: swapResult.image.url,
+                width: swapResult.image.width,
+                height: swapResult.image.height,
+              });
+            } else {
+              this.logger.warn(`Face swap failed for image ${i + 1}, keeping original`);
+              generatedImages.push(baseImage);
+            }
+          } catch (swapError) {
+            this.logger.warn(`Face swap error for image ${i + 1}: ${swapError}, keeping original`);
+            generatedImages.push(baseImage);
+          }
+
+          await this.supabase.updateJob(jobId, {
+            progress: 50 + Math.floor((i + 1) / baseResult.images.length * 40),
+            external_status: 'SWAPPING_FACES',
+          });
+        }
+
+        result = { images: generatedImages };
       } else if (mode === 'face-swap' && sourceImageUrl && loraWeightsUrl && loraTriggerWord) {
         // LoRA Face swap mode: generate reference face from LoRA, then swap into source image
         this.logger.log(`LoRA Face swap mode: generating reference face, then using fal-ai/face-swap`);
@@ -256,8 +329,8 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
 
         await this.supabase.updateJob(jobId, { progress: 10, external_status: 'GENERATING_BASE' });
 
-        // Step 1: Generate base images with Nano Banana (without the trigger word - it's not a LoRA)
-        const baseResult = await this.falService.runNanoBananaGeneration({
+        // Step 1: Generate base images with Nano Banana (Direct Gemini API, no LoRA support)
+        const baseResult = await this.geminiService.runNanoBananaGeneration({
           prompt: prompt,
           num_images: numImages,
           aspect_ratio: aspectRatioMap[aspectRatio || '9:16'] || '9:16',
@@ -269,15 +342,14 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
         });
 
         if (!baseResult.images || baseResult.images.length === 0) {
-          throw new Error('Nano Banana returned no images');
+          throw new Error('Nano Banana (Gemini) returned no images');
         }
 
-        this.logger.log(`Generated ${baseResult.images.length} base images with Nano Banana`);
+        this.logger.log(`Generated ${baseResult.images.length} base images with Nano Banana (Gemini)`);
         await this.supabase.updateJob(jobId, { progress: 50, external_status: 'GENERATING_REFERENCE' });
 
-        // Step 2: Generate a reference face from the LoRA for face swap
-        // Use FLUX for this since we need the LoRA identity
-        let referenceFaceUrl: string;
+        // Step 2: Try to get a reference face for face swap (optional)
+        let referenceFaceUrl: string | null = null;
 
         if (characterDiagramUrl) {
           // If we have a character diagram, use it as the reference face
@@ -298,54 +370,62 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
             num_images: 1,
           });
 
-          if (!faceResult.images || faceResult.images.length === 0) {
-            throw new Error('Failed to generate reference face from LoRA');
+          if (faceResult.images && faceResult.images.length > 0) {
+            referenceFaceUrl = faceResult.images[0].url;
+            this.logger.log(`Generated reference face from FLUX LoRA: ${referenceFaceUrl}`);
+          } else {
+            this.logger.warn('Failed to generate reference face from LoRA, will skip face swap');
           }
-          referenceFaceUrl = faceResult.images[0].url;
-          this.logger.log(`Generated reference face from FLUX LoRA: ${referenceFaceUrl}`);
         } else {
-          // For WAN 2.2 LoRAs without a character diagram, we can't generate images
-          throw new Error(
-            'WAN 2.2 LoRAs require a Character Diagram or Reference Kit for image generation. ' +
-            'Please create a Character Diagram first, then use it for image generation.'
+          // WAN 2.2 LoRA without character diagram - face swap will be skipped
+          this.logger.warn(
+            `[ImageGeneration] No face reference available for WAN 2.2 LoRA. ` +
+            `Face swap will be skipped. Link a Character Diagram or Reference Kit for face consistency.`
           );
         }
 
-        await this.supabase.updateJob(jobId, { progress: 60, external_status: 'SWAPPING_FACES' });
-
-        // Step 3: Face swap the reference face onto each base image
+        // Step 3: Apply face swap if we have a reference, otherwise use base images
         const generatedImages: Array<{ url: string; width: number; height: number }> = [];
 
-        for (let i = 0; i < baseResult.images.length; i++) {
-          const baseImage = baseResult.images[i];
-          this.logger.log(`Face swap ${i + 1}/${baseResult.images.length}`);
+        if (referenceFaceUrl) {
+          await this.supabase.updateJob(jobId, { progress: 60, external_status: 'SWAPPING_FACES' });
 
-          try {
-            const swapResult = await this.falService.runFaceSwap({
-              base_image_url: baseImage.url,
-              swap_image_url: referenceFaceUrl,
-            });
+          for (let i = 0; i < baseResult.images.length; i++) {
+            const baseImage = baseResult.images[i];
+            this.logger.log(`Face swap ${i + 1}/${baseResult.images.length}`);
 
-            if (swapResult.image) {
-              generatedImages.push({
-                url: swapResult.image.url,
-                width: swapResult.image.width,
-                height: swapResult.image.height,
+            try {
+              const swapResult = await this.falService.runFaceSwap({
+                base_image_url: baseImage.url,
+                swap_image_url: referenceFaceUrl,
               });
-            } else {
-              // Face swap failed, keep original
-              this.logger.warn(`Face swap failed for image ${i + 1}, keeping original`);
+
+              if (swapResult.image) {
+                generatedImages.push({
+                  url: swapResult.image.url,
+                  width: swapResult.image.width,
+                  height: swapResult.image.height,
+                });
+              } else {
+                // Face swap failed, keep original
+                this.logger.warn(`Face swap failed for image ${i + 1}, keeping original`);
+                generatedImages.push(baseImage);
+              }
+            } catch (swapError) {
+              this.logger.warn(`Face swap error for image ${i + 1}: ${swapError}, keeping original`);
               generatedImages.push(baseImage);
             }
-          } catch (swapError) {
-            this.logger.warn(`Face swap error for image ${i + 1}: ${swapError}, keeping original`);
-            generatedImages.push(baseImage);
-          }
 
-          await this.supabase.updateJob(jobId, {
-            progress: 60 + Math.floor((i + 1) / baseResult.images.length * 30),
-            external_status: 'SWAPPING_FACES',
-          });
+            await this.supabase.updateJob(jobId, {
+              progress: 60 + Math.floor((i + 1) / baseResult.images.length * 30),
+              external_status: 'SWAPPING_FACES',
+            });
+          }
+        } else {
+          // No face reference - skip face swap, use base images directly
+          this.logger.log(`Skipping face swap - no reference available. Returning ${baseResult.images.length} base images.`);
+          await this.supabase.updateJob(jobId, { progress: 90, external_status: 'COMPLETING' });
+          generatedImages.push(...baseResult.images);
         }
 
         result = { images: generatedImages };

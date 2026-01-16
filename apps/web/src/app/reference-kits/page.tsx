@@ -12,7 +12,10 @@ import {
   RefreshCw,
   User,
   Users,
+  Video,
+  FolderOpen,
 } from 'lucide-react';
+import { processFilesWithZipSupport } from '@/lib/zip-utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -21,7 +24,7 @@ import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
 import { useToast } from '@/components/ui/use-toast';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { referenceKitApi, filesApi, type ReferenceKit } from '@/lib/api';
+import { referenceKitApi, filesApi, type ReferenceKit, type ReferenceKitSourceImage } from '@/lib/api';
 
 const EXPRESSION_OPTIONS = [
   { id: 'smile', label: 'Smile' },
@@ -35,8 +38,12 @@ export default function ReferenceKitsPage() {
 
   // Form state
   const [name, setName] = useState('');
-  const [file, setFile] = useState<File | null>(null);
-  const [preview, setPreview] = useState<string | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
+  const [previews, setPreviews] = useState<string[]>([]);
+  const [isProcessingZip, setIsProcessingZip] = useState(false);
+  const [isProcessingVideo, setIsProcessingVideo] = useState(false);
+  const [googleDriveUrl, setGoogleDriveUrl] = useState('');
+  const [isImportingDrive, setIsImportingDrive] = useState(false);
   const [generateExtended, setGenerateExtended] = useState(false);
   const [selectedExpressions, setSelectedExpressions] = useState<string[]>([]);
   const [isUploading, setIsUploading] = useState(false);
@@ -48,6 +55,7 @@ export default function ReferenceKitsPage() {
 
   // Detail modal state
   const [selectedKit, setSelectedKit] = useState<ReferenceKit | null>(null);
+  const [selectedKitSources, setSelectedKitSources] = useState<ReferenceKitSourceImage[]>([]);
   const [detailModalOpen, setDetailModalOpen] = useState(false);
 
   // Fetch kits
@@ -69,33 +77,157 @@ export default function ReferenceKitsPage() {
     return () => clearInterval(interval);
   }, [fetchKits]);
 
-  // Dropzone
-  const onDrop = useCallback((acceptedFiles: File[]) => {
-    const imageFile = acceptedFiles[0];
-    if (imageFile && imageFile.type.startsWith('image/')) {
-      setFile(imageFile);
-      setPreview(URL.createObjectURL(imageFile));
-    }
+  // Helper to add files
+  const addFiles = useCallback((newFiles: File[]) => {
+    setFiles((prev) => [...prev, ...newFiles]);
+    setPreviews((prev) => [...prev, ...newFiles.map((f) => URL.createObjectURL(f))]);
   }, []);
+
+  // Dropzone
+  const onDrop = useCallback(async (acceptedFiles: File[]) => {
+    // Separate videos from other files
+    const videoFiles = acceptedFiles.filter(f =>
+      f.type.startsWith('video/') || ['.mp4', '.mov', '.avi', '.webm'].some(ext => f.name.toLowerCase().endsWith(ext))
+    );
+    const otherFiles = acceptedFiles.filter(f =>
+      !f.type.startsWith('video/') && !['.mp4', '.mov', '.avi', '.webm'].some(ext => f.name.toLowerCase().endsWith(ext))
+    );
+
+    // Process non-video files (images and ZIPs)
+    if (otherFiles.length > 0) {
+      setIsProcessingZip(true);
+      try {
+        const imageFiles = await processFilesWithZipSupport(otherFiles);
+        if (imageFiles.length > 0) {
+          addFiles(imageFiles);
+        }
+      } finally {
+        setIsProcessingZip(false);
+      }
+    }
+
+    // Process video files - extract frames via API
+    if (videoFiles.length > 0) {
+      setIsProcessingVideo(true);
+      toast({ title: 'Processing Videos', description: `Extracting frames from ${videoFiles.length} video(s)...` });
+
+      for (const video of videoFiles) {
+        try {
+          const formData = new FormData();
+          formData.append('video', video);
+
+          const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'}/files/extract-frames?maxFrames=50&targetFps=1`, {
+            method: 'POST',
+            body: formData,
+          });
+
+          if (!response.ok) {
+            throw new Error(`Failed to extract frames from ${video.name}`);
+          }
+
+          const data = await response.json();
+          const frameUrls: string[] = data.frames || [];
+
+          // Convert frame URLs to File objects
+          const frameFiles: File[] = [];
+          for (let i = 0; i < frameUrls.length; i++) {
+            const frameResponse = await fetch(frameUrls[i]);
+            const blob = await frameResponse.blob();
+            const file = new File([blob], `${video.name}_frame_${i.toString().padStart(4, '0')}.png`, { type: 'image/png' });
+            frameFiles.push(file);
+          }
+
+          addFiles(frameFiles);
+          toast({ title: 'Frames Extracted', description: `Extracted ${frameFiles.length} frames from ${video.name}` });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Failed to process video';
+          toast({ title: 'Error', description: message, variant: 'destructive' });
+        }
+      }
+      setIsProcessingVideo(false);
+    }
+  }, [addFiles, toast]);
+
+  // Import from Google Drive folder
+  const handleGoogleDriveImport = async () => {
+    if (!googleDriveUrl.trim()) {
+      toast({ title: 'Error', description: 'Please enter a Google Drive folder URL', variant: 'destructive' });
+      return;
+    }
+
+    setIsImportingDrive(true);
+    toast({ title: 'Importing', description: 'Downloading files from Google Drive...' });
+
+    try {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'}/files/import-gdrive`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          folderUrl: googleDriveUrl.trim(),
+          maxFramesPerVideo: 50,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to import from Google Drive');
+      }
+
+      const data = await response.json();
+      const imageUrls: string[] = data.images || [];
+
+      // Convert URLs to File objects
+      const importedFiles: File[] = [];
+      for (let i = 0; i < imageUrls.length; i++) {
+        const imageResponse = await fetch(imageUrls[i]);
+        const blob = await imageResponse.blob();
+        const ext = imageUrls[i].split('.').pop()?.split('?')[0] || 'png';
+        const file = new File([blob], `gdrive_import_${i.toString().padStart(4, '0')}.${ext}`, { type: blob.type || 'image/png' });
+        importedFiles.push(file);
+      }
+
+      addFiles(importedFiles);
+      setGoogleDriveUrl('');
+      toast({ title: 'Import Complete', description: `Imported ${importedFiles.length} images from Google Drive` });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to import';
+      toast({ title: 'Error', description: message, variant: 'destructive' });
+    } finally {
+      setIsImportingDrive(false);
+    }
+  };
+
+  const isAnyProcessing = isProcessingZip || isProcessingVideo || isImportingDrive;
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: { 'image/*': ['.png', '.jpg', '.jpeg', '.webp'] },
-    multiple: false,
+    accept: {
+      'image/*': ['.png', '.jpg', '.jpeg', '.webp'],
+      'application/zip': ['.zip'],
+      'application/x-zip-compressed': ['.zip'],
+      'video/*': ['.mp4', '.mov', '.avi', '.webm'],
+    },
+    multiple: true,
+    disabled: isAnyProcessing,
   });
 
-  const clearFile = () => {
-    if (preview) URL.revokeObjectURL(preview);
-    setFile(null);
-    setPreview(null);
+  const removeFile = (index: number) => {
+    URL.revokeObjectURL(previews[index]);
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+    setPreviews((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const clearAllFiles = () => {
+    previews.forEach((p) => URL.revokeObjectURL(p));
+    setFiles([]);
+    setPreviews([]);
   };
 
   // Submit handler
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!file) {
-      toast({ title: 'Error', description: 'Please upload an image', variant: 'destructive' });
+    if (files.length === 0) {
+      toast({ title: 'Error', description: 'Please upload at least one image', variant: 'destructive' });
       return;
     }
 
@@ -108,14 +240,19 @@ export default function ReferenceKitsPage() {
       setIsCreating(true);
       setIsUploading(true);
 
-      toast({ title: 'Uploading', description: 'Uploading source image...' });
-      const uploadResult = await filesApi.uploadFile(file, 'character-images');
+      toast({ title: 'Uploading', description: `Uploading ${files.length} image${files.length > 1 ? 's' : ''}...` });
+
+      // Upload all files in parallel
+      const uploadPromises = files.map((file) => filesApi.uploadFile(file, 'character-images'));
+      const uploadResults = await Promise.all(uploadPromises);
+      const imageUrls = uploadResults.map((r) => r.url);
+
       setIsUploading(false);
 
       toast({ title: 'Starting', description: 'Starting Reference Kit generation...' });
       await referenceKitApi.create({
         name: name.trim(),
-        sourceImageUrl: uploadResult.url,
+        imageUrls,
         generateExtended,
         expressions: selectedExpressions.length > 0 ? selectedExpressions : undefined,
       });
@@ -126,7 +263,7 @@ export default function ReferenceKitsPage() {
       });
 
       setName('');
-      clearFile();
+      clearAllFiles();
       setGenerateExtended(false);
       setSelectedExpressions([]);
       fetchKits();
@@ -161,9 +298,17 @@ export default function ReferenceKitsPage() {
     }
   };
 
-  const openDetailModal = (kit: ReferenceKit) => {
+  const openDetailModal = async (kit: ReferenceKit) => {
     setSelectedKit(kit);
     setDetailModalOpen(true);
+    // Fetch source images
+    try {
+      const sources = await referenceKitApi.getSources(kit.id);
+      setSelectedKitSources(sources);
+    } catch (error) {
+      console.error('Failed to fetch sources:', error);
+      setSelectedKitSources([]);
+    }
   };
 
   const toggleExpression = (expr: string) => {
@@ -244,50 +389,125 @@ export default function ReferenceKitsPage() {
                 />
               </div>
 
-              {/* Source Image */}
+              {/* Source Images */}
               <div className="space-y-2">
-                <Label>Source Image *</Label>
-                {!file ? (
-                  <div
-                    {...getRootProps()}
-                    className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
-                      isDragActive
-                        ? 'border-primary bg-primary/5'
-                        : 'border-muted-foreground/25 hover:border-primary/50'
-                    } ${isCreating ? 'pointer-events-none opacity-50' : ''}`}
-                  >
-                    <input {...getInputProps()} />
-                    <Upload className="w-10 h-10 mx-auto mb-3 text-muted-foreground" />
-                    {isDragActive ? (
-                      <p>Drop the image here...</p>
-                    ) : (
-                      <p className="text-muted-foreground">
-                        Drag & drop a clear photo of the person
-                      </p>
-                    )}
-                    <p className="text-xs text-muted-foreground mt-2">
-                      PNG, JPG, JPEG, or WebP - A front-facing photo works best
-                    </p>
-                  </div>
-                ) : (
-                  <div className="relative">
-                    <img
-                      src={preview!}
-                      alt="Preview"
-                      className="w-full max-h-64 object-contain rounded-lg border"
-                    />
+                <div className="flex items-center justify-between">
+                  <Label>Source Images *</Label>
+                  {files.length > 0 && (
                     <Button
                       type="button"
-                      variant="destructive"
-                      size="icon"
-                      className="absolute top-2 right-2"
-                      onClick={clearFile}
+                      variant="ghost"
+                      size="sm"
+                      onClick={clearAllFiles}
                       disabled={isCreating}
                     >
-                      <Trash2 className="w-4 h-4" />
+                      Clear all
                     </Button>
+                  )}
+                </div>
+
+                {/* Image previews grid - scrollable */}
+                {previews.length > 0 && (
+                  <div className="max-h-48 overflow-y-auto rounded-lg border bg-muted/20 p-2">
+                    <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                      {previews.map((previewUrl, index) => (
+                        <div key={index} className="relative group">
+                          <img
+                            src={previewUrl}
+                            alt={`Source ${index + 1}`}
+                            className="w-full aspect-square object-cover rounded-lg border"
+                          />
+                          <Button
+                            type="button"
+                            variant="destructive"
+                            size="icon"
+                            className="absolute top-1 right-1 w-5 h-5 opacity-0 group-hover:opacity-100 transition-opacity"
+                            onClick={() => removeFile(index)}
+                            disabled={isCreating}
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </Button>
+                          {index === 0 && (
+                            <Badge className="absolute bottom-1 left-1 text-[10px] px-1" variant="secondary">
+                              Primary
+                            </Badge>
+                          )}
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
+
+                {/* Dropzone - always visible to add more */}
+                <div
+                  {...getRootProps()}
+                  className={`border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors ${
+                    isDragActive
+                      ? 'border-primary bg-primary/5'
+                      : 'border-muted-foreground/25 hover:border-primary/50'
+                  } ${isCreating || isAnyProcessing ? 'pointer-events-none opacity-50' : ''}`}
+                >
+                  <input {...getInputProps()} />
+                  {isProcessingZip ? (
+                    <>
+                      <Loader2 className="w-8 h-8 mx-auto mb-2 text-muted-foreground animate-spin" />
+                      <p className="text-sm text-muted-foreground">Extracting images...</p>
+                    </>
+                  ) : isProcessingVideo ? (
+                    <>
+                      <Loader2 className="w-8 h-8 mx-auto mb-2 text-muted-foreground animate-spin" />
+                      <p className="text-sm text-muted-foreground">Extracting frames from video...</p>
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex items-center justify-center gap-2 mb-2">
+                        <Upload className="w-8 h-8 text-muted-foreground" />
+                        <Video className="w-6 h-6 text-muted-foreground" />
+                      </div>
+                      {isDragActive ? (
+                        <p className="text-sm">Drop files here...</p>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">
+                          {files.length === 0
+                            ? 'Drag & drop images, videos, or ZIP'
+                            : 'Add more files'}
+                        </p>
+                      )}
+                    </>
+                  )}
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Images, Videos (frames auto-extracted), or ZIP
+                  </p>
+                </div>
+
+                {/* Google Drive Import */}
+                <div className="flex gap-2 mt-3">
+                  <div className="flex-1 flex items-center gap-2">
+                    <FolderOpen className="w-4 h-4 text-muted-foreground shrink-0" />
+                    <Input
+                      placeholder="Google Drive folder URL..."
+                      value={googleDriveUrl}
+                      onChange={(e) => setGoogleDriveUrl(e.target.value)}
+                      disabled={isCreating || isAnyProcessing}
+                      className="flex-1"
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleGoogleDriveImport}
+                    disabled={isCreating || isAnyProcessing || !googleDriveUrl.trim()}
+                  >
+                    {isImportingDrive ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      'Import'
+                    )}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Paste a Google Drive folder link (folder must be publicly shared)
+                </p>
               </div>
 
               {/* Reference Options */}
@@ -339,7 +559,7 @@ export default function ReferenceKitsPage() {
                 </p>
               </div>
 
-              <Button type="submit" className="w-full" disabled={isCreating || !file || !name.trim()}>
+              <Button type="submit" className="w-full" disabled={isCreating || files.length === 0 || !name.trim()}>
                 {isCreating ? (
                   <>
                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -431,7 +651,10 @@ export default function ReferenceKitsPage() {
       </div>
 
       {/* Detail Modal */}
-      <Dialog open={detailModalOpen} onOpenChange={setDetailModalOpen}>
+      <Dialog open={detailModalOpen} onOpenChange={(open) => {
+        setDetailModalOpen(open);
+        if (!open) setSelectedKitSources([]);
+      }}>
         <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{selectedKit?.name}</DialogTitle>
@@ -441,14 +664,37 @@ export default function ReferenceKitsPage() {
           </DialogHeader>
           {selectedKit && (
             <div className="space-y-4">
-              {/* Source */}
+              {/* Source Images - scrollable */}
               <div className="space-y-2">
-                <Label className="text-sm font-medium">Source Image</Label>
-                <img
-                  src={selectedKit.source_image_url}
-                  alt="Source"
-                  className="w-32 h-32 object-cover rounded-lg border"
-                />
+                <Label className="text-sm font-medium">
+                  Source Images {selectedKitSources.length > 0 && `(${selectedKitSources.length})`}
+                </Label>
+                <div className="max-h-24 overflow-x-auto overflow-y-hidden">
+                  <div className="flex gap-2 pb-1">
+                    {selectedKitSources.length > 0 ? (
+                      selectedKitSources.map((source, index) => (
+                        <div key={source.id} className="relative flex-shrink-0">
+                          <img
+                            src={source.image_url}
+                            alt={`Source ${index + 1}`}
+                            className="w-16 h-16 object-cover rounded-lg border"
+                          />
+                          {index === 0 && (
+                            <Badge className="absolute -top-1 -right-1 text-[10px] px-1" variant="secondary">
+                              1
+                            </Badge>
+                          )}
+                        </div>
+                      ))
+                    ) : (
+                      <img
+                        src={selectedKit.source_image_url}
+                        alt="Source"
+                        className="w-16 h-16 object-cover rounded-lg border"
+                      />
+                    )}
+                  </div>
+                </div>
               </div>
 
               {/* Core References */}

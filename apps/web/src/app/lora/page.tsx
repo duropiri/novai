@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { Upload, Trash2, Loader2, CheckCircle, XCircle, Clock, FileUp, Check, X, Pencil, Terminal, ChevronDown, ChevronUp, StopCircle, RotateCcw, Info, Settings } from 'lucide-react';
+import { Upload, Trash2, Loader2, CheckCircle, XCircle, Clock, FileUp, Check, X, Pencil, Terminal, ChevronDown, ChevronUp, StopCircle, RotateCcw, Info, Settings, ChevronLeft, ChevronRight, Images, Grid3X3 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -24,6 +24,8 @@ import { Switch } from '@/components/ui/switch';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { loraApi, filesApi, type LoraModel } from '@/lib/api';
+import { processFilesWithZipSupport } from '@/lib/zip-utils';
+import { FaceSelector, type FaceProcessingResult } from '@/components/face-selector';
 
 // Training log entry for persistent storage
 interface TrainingLogEntry {
@@ -63,6 +65,12 @@ export default function LoraCreatorPage() {
   const [triggerWord, setTriggerWord] = useState('');
   const [steps, setSteps] = useState(1000);
   const [files, setFiles] = useState<File[]>([]);
+  const [isProcessingZip, setIsProcessingZip] = useState(false);
+  const [isProcessingVideo, setIsProcessingVideo] = useState(false);
+  const [googleDriveUrl, setGoogleDriveUrl] = useState('');
+  const [googleDriveZipUrl, setGoogleDriveZipUrl] = useState<string | null>(null);
+  const [googleDriveImageCount, setGoogleDriveImageCount] = useState(0);
+  const [isImportingDrive, setIsImportingDrive] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [loraModels, setLoraModels] = useState<LoraModel[]>([]);
@@ -73,7 +81,7 @@ export default function LoraCreatorPage() {
   const [learningRate, setLearningRate] = useState(0.0007);
   const [includeSyntheticCaptions, setIncludeSyntheticCaptions] = useState(false);
   const [useFaceDetection, setUseFaceDetection] = useState(true);
-  const [useFaceCropping, setUseFaceCropping] = useState(false);
+  const [useFaceCropping, setUseFaceCropping] = useState(true); // HiRA - prioritize face resemblance
   const [useMasks, setUseMasks] = useState(true);
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
 
@@ -103,14 +111,23 @@ export default function LoraCreatorPage() {
 
   // Training log state
   const [trainingLog, setTrainingLog] = useState<TrainingLogEntry[]>([]);
-  const [isLogExpanded, setIsLogExpanded] = useState(true);
-  const logEndRef = useRef<HTMLDivElement>(null);
   const prevModelsRef = useRef<Map<string, LoraModel>>(new Map());
+
+  // HiRA (High Rank Adaptation) face identity state
+  const [enableFaceIdentity, setEnableFaceIdentity] = useState(true);
+  const [createdLoraId, setCreatedLoraId] = useState<string | null>(null);
+  const [faceProcessingResult, setFaceProcessingResult] = useState<FaceProcessingResult | null>(null);
+  const [selectedFaceIdentityId, setSelectedFaceIdentityId] = useState<string | null>(null);
 
   // Pending deletions state (for undo functionality)
   const [pendingDeletions, setPendingDeletions] = useState<Set<string>>(new Set());
   const deletionTimersRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const DELETION_DELAY_MS = 5000; // 5 seconds to undo
+
+  // Image gallery state
+  const [galleryOpen, setGalleryOpen] = useState(false);
+  const [galleryIndex, setGalleryIndex] = useState(0);
+  const PREVIEW_LIMIT = 12; // Max images to show in grid preview
 
   // Load training log from localStorage on mount
   useEffect(() => {
@@ -202,41 +219,180 @@ export default function LoraCreatorPage() {
     return () => clearInterval(interval);
   }, [fetchModels]);
 
-  // Auto-scroll log to bottom when new entries are added
-  useEffect(() => {
-    if (isLogExpanded && logEndRef.current) {
-      logEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [trainingLog, isLogExpanded]);
+  const onDrop = useCallback(async (acceptedFiles: File[]) => {
+    // Separate videos from other files
+    const videoFiles = acceptedFiles.filter(f =>
+      f.type.startsWith('video/') || ['.mp4', '.mov', '.avi', '.webm'].some(ext => f.name.toLowerCase().endsWith(ext))
+    );
+    const otherFiles = acceptedFiles.filter(f =>
+      !f.type.startsWith('video/') && !['.mp4', '.mov', '.avi', '.webm'].some(ext => f.name.toLowerCase().endsWith(ext))
+    );
 
-  // Clear completed entries from log
-  const clearCompletedLogs = () => {
-    setTrainingLog((current) => {
-      const active = current.filter(e => e.status === 'pending' || e.status === 'training');
-      saveTrainingLog(active);
-      return active;
-    });
+    // Process non-video files (images and ZIPs)
+    if (otherFiles.length > 0) {
+      setIsProcessingZip(true);
+      try {
+        const imageFiles = await processFilesWithZipSupport(otherFiles);
+        setFiles((prev) => [...prev, ...imageFiles]);
+      } finally {
+        setIsProcessingZip(false);
+      }
+    }
+
+    // Process video files - extract frames via API
+    if (videoFiles.length > 0) {
+      setIsProcessingVideo(true);
+      toast({ title: 'Processing Videos', description: `Extracting frames from ${videoFiles.length} video(s)...` });
+
+      for (const video of videoFiles) {
+        try {
+          const formData = new FormData();
+          formData.append('video', video);
+
+          const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'}/files/extract-frames?maxFrames=50&targetFps=1`, {
+            method: 'POST',
+            body: formData,
+          });
+
+          if (!response.ok) {
+            throw new Error(`Failed to extract frames from ${video.name}`);
+          }
+
+          const data = await response.json();
+          const frameUrls: string[] = data.frames || [];
+
+          // Convert frame URLs to File objects by fetching them
+          const frameFiles: File[] = [];
+          for (let i = 0; i < frameUrls.length; i++) {
+            const frameResponse = await fetch(frameUrls[i]);
+            const blob = await frameResponse.blob();
+            const file = new File([blob], `${video.name}_frame_${i.toString().padStart(4, '0')}.png`, { type: 'image/png' });
+            frameFiles.push(file);
+          }
+
+          setFiles((prev) => [...prev, ...frameFiles]);
+          toast({ title: 'Frames Extracted', description: `Extracted ${frameFiles.length} frames from ${video.name}` });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Failed to process video';
+          toast({ title: 'Error', description: message, variant: 'destructive' });
+        }
+      }
+      setIsProcessingVideo(false);
+    }
+  }, [toast]);
+
+  // Import from Google Drive folder
+  // Uses server-side ZIP creation - no need to download files locally
+  const handleGoogleDriveImport = async () => {
+    if (!googleDriveUrl.trim()) {
+      toast({ title: 'Error', description: 'Please enter a Google Drive folder URL', variant: 'destructive' });
+      return;
+    }
+
+    setIsImportingDrive(true);
+    toast({ title: 'Importing', description: 'Importing files from Google Drive...' });
+
+    try {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'}/files/import-gdrive`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          folderUrl: googleDriveUrl.trim(),
+          maxFramesPerVideo: 50,
+          createZip: true,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to import from Google Drive');
+      }
+
+      const data = await response.json();
+      const imageCount = data.count || 0;
+      const zipUrl = data.zipUrl;
+
+      if (!zipUrl) {
+        throw new Error('No images found in Google Drive folder');
+      }
+
+      // Store the ZIP URL directly - no need to download files locally
+      setGoogleDriveZipUrl(zipUrl);
+      setGoogleDriveImageCount(imageCount);
+      setGoogleDriveUrl('');
+      // Clear any local files to avoid confusion
+      setFiles([]);
+      toast({
+        title: 'Import Complete',
+        description: `Ready to train with ${imageCount} images from Google Drive`
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to import';
+      toast({ title: 'Error', description: message, variant: 'destructive' });
+    } finally {
+      setIsImportingDrive(false);
+    }
   };
 
-  const onDrop = useCallback((acceptedFiles: File[]) => {
-    // Filter for image files only
-    const imageFiles = acceptedFiles.filter((file) =>
-      file.type.startsWith('image/')
-    );
-    setFiles((prev) => [...prev, ...imageFiles]);
-  }, []);
+  // Clear Google Drive import
+  const clearGoogleDriveImport = () => {
+    setGoogleDriveZipUrl(null);
+    setGoogleDriveImageCount(0);
+  };
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: {
       'image/*': ['.png', '.jpg', '.jpeg', '.webp'],
+      'application/zip': ['.zip'],
+      'application/x-zip-compressed': ['.zip'],
+      'video/*': ['.mp4', '.mov', '.avi', '.webm'],
     },
     multiple: true,
+    disabled: isProcessingZip || isProcessingVideo,
   });
 
   const removeFile = (index: number) => {
     setFiles((prev) => prev.filter((_, i) => i !== index));
   };
+
+  // Memoized preview URLs - only create object URLs for visible images
+  const previewUrls = useMemo(() => {
+    const urls: string[] = [];
+    const limit = Math.min(files.length, PREVIEW_LIMIT);
+    for (let i = 0; i < limit; i++) {
+      urls.push(URL.createObjectURL(files[i]));
+    }
+    return urls;
+  }, [files, PREVIEW_LIMIT]);
+
+  // Cleanup preview URLs when files change
+  useEffect(() => {
+    return () => {
+      previewUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [previewUrls]);
+
+  // Gallery navigation
+  const openGallery = (index: number) => {
+    setGalleryIndex(index);
+    setGalleryOpen(true);
+  };
+
+  const nextImage = () => {
+    setGalleryIndex((prev) => (prev + 1) % files.length);
+  };
+
+  const prevImage = () => {
+    setGalleryIndex((prev) => (prev - 1 + files.length) % files.length);
+  };
+
+  // Get URL for gallery (create on demand for non-preview images)
+  const getGalleryUrl = useCallback((index: number) => {
+    if (index < previewUrls.length) {
+      return previewUrls[index];
+    }
+    return URL.createObjectURL(files[index]);
+  }, [files, previewUrls]);
 
   const createZipFromFiles = async (files: File[]): Promise<Blob> => {
     // Dynamic import for JSZip (we'll need to add this package)
@@ -264,7 +420,11 @@ export default function LoraCreatorPage() {
       return;
     }
 
-    if (files.length < 3) {
+    // Check for images: either local files OR Google Drive import
+    const hasLocalFiles = files.length >= 3;
+    const hasGoogleDriveImport = googleDriveZipUrl && googleDriveImageCount >= 3;
+
+    if (!hasLocalFiles && !hasGoogleDriveImport) {
       toast({
         title: 'Error',
         description: 'At least 3 images are required for training',
@@ -275,26 +435,34 @@ export default function LoraCreatorPage() {
 
     try {
       setIsCreating(true);
-      setIsUploading(true);
+      let imagesZipUrl: string;
 
-      // Create ZIP file from images
-      toast({ title: 'Preparing', description: 'Creating ZIP file from images...' });
-      const zipBlob = await createZipFromFiles(files);
-      const zipFile = new File([zipBlob], `${name.toLowerCase().replace(/\s+/g, '-')}-images.zip`, {
-        type: 'application/zip',
-      });
+      if (googleDriveZipUrl) {
+        // Use the pre-created ZIP from Google Drive import directly
+        imagesZipUrl = googleDriveZipUrl;
+        toast({ title: 'Starting', description: 'Using imported Google Drive images...' });
+      } else {
+        // Create ZIP file from local images
+        setIsUploading(true);
+        toast({ title: 'Preparing', description: 'Creating ZIP file from images...' });
+        const zipBlob = await createZipFromFiles(files);
+        const zipFile = new File([zipBlob], `${name.toLowerCase().replace(/\s+/g, '-')}-images.zip`, {
+          type: 'application/zip',
+        });
 
-      // Upload ZIP to Supabase
-      toast({ title: 'Uploading', description: 'Uploading training images...' });
-      const uploadResult = await filesApi.uploadFile(zipFile, 'training-images');
-      setIsUploading(false);
+        // Upload ZIP to Supabase
+        toast({ title: 'Uploading', description: 'Uploading training images...' });
+        const uploadResult = await filesApi.uploadFile(zipFile, 'training-images');
+        imagesZipUrl = uploadResult.url;
+        setIsUploading(false);
+      }
 
       // Create LoRA training job
       toast({ title: 'Starting', description: 'Starting LoRA training...' });
       await loraApi.create({
         name: name.trim(),
         triggerWord: triggerWord.trim().toLowerCase(),
-        imagesZipUrl: uploadResult.url,
+        imagesZipUrl,
         steps,
         learningRate,
         isStyle,
@@ -314,11 +482,13 @@ export default function LoraCreatorPage() {
       setTriggerWord('');
       setSteps(1000);
       setFiles([]);
+      setGoogleDriveZipUrl(null);
+      setGoogleDriveImageCount(0);
       setIsStyle(false);
       setLearningRate(0.0007);
       setIncludeSyntheticCaptions(false);
       setUseFaceDetection(true);
-      setUseFaceCropping(false);
+      setUseFaceCropping(true); // HiRA default - prioritize face resemblance
       setUseMasks(true);
       setAdvancedSettingsOpen(false);
 
@@ -601,117 +771,6 @@ export default function LoraCreatorPage() {
           Train a custom LoRA model to capture a specific face for AI generation
         </p>
       </div>
-
-      {/* Training Log */}
-      {trainingLog.length > 0 && (
-        <Card className="mb-6">
-          <CardHeader className="py-3 cursor-pointer" onClick={() => setIsLogExpanded(!isLogExpanded)}>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Terminal className="w-4 h-4" />
-                <CardTitle className="text-base">Training Log</CardTitle>
-                <Badge variant="outline" className="ml-2">
-                  {trainingLog.filter(e => e.status === 'training' || e.status === 'pending').length} active
-                </Badge>
-              </div>
-              <div className="flex items-center gap-2">
-                {trainingLog.some(e => e.status === 'ready' || e.status === 'failed') && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      clearCompletedLogs();
-                    }}
-                    className="text-xs h-7"
-                  >
-                    Clear completed
-                  </Button>
-                )}
-                {isLogExpanded ? (
-                  <ChevronUp className="w-4 h-4" />
-                ) : (
-                  <ChevronDown className="w-4 h-4" />
-                )}
-              </div>
-            </div>
-          </CardHeader>
-          {isLogExpanded && (
-            <CardContent className="pt-0">
-              <div className="h-[200px] w-full rounded border bg-muted/30 overflow-y-auto">
-                <div className="p-3 font-mono text-xs space-y-2">
-                  {trainingLog.map((entry, idx) => (
-                    <div
-                      key={`${entry.id}-${idx}`}
-                      className={`flex items-start gap-2 ${
-                        entry.status === 'failed' ? 'text-destructive' :
-                        entry.status === 'ready' ? 'text-green-600 dark:text-green-400' :
-                        'text-foreground'
-                      }`}
-                    >
-                      <span className="text-muted-foreground shrink-0">
-                        [{new Date(entry.timestamp).toLocaleTimeString()}]
-                      </span>
-                      <span className="shrink-0 font-semibold">{entry.name}:</span>
-                      <span className="flex-1">
-                        {entry.status === 'training' && (
-                          <span className="text-blue-600 dark:text-blue-400">
-                            [{entry.progress}%] {entry.statusMessage}
-                          </span>
-                        )}
-                        {entry.status === 'pending' && (
-                          <span className="text-yellow-600 dark:text-yellow-400">
-                            [Pending] {entry.statusMessage}
-                          </span>
-                        )}
-                        {entry.status === 'ready' && (
-                          <span>
-                            [Complete] {entry.statusMessage}
-                          </span>
-                        )}
-                        {entry.status === 'failed' && (
-                          <span>
-                            [Failed] {entry.statusMessage}
-                          </span>
-                        )}
-                      </span>
-                      {/* Status icons and action buttons */}
-                      {(entry.status === 'training' || entry.status === 'pending') && (
-                        <>
-                          <Loader2 className="w-3 h-3 animate-spin shrink-0" />
-                          <button
-                            onClick={() => handleCancel(entry.id, entry.name)}
-                            className="text-destructive hover:underline shrink-0"
-                            title="Cancel"
-                          >
-                            [Cancel]
-                          </button>
-                        </>
-                      )}
-                      {entry.status === 'ready' && (
-                        <CheckCircle className="w-3 h-3 shrink-0" />
-                      )}
-                      {entry.status === 'failed' && (
-                        <>
-                          <XCircle className="w-3 h-3 shrink-0" />
-                          <button
-                            onClick={() => handleRetry(entry.id, entry.name)}
-                            className="text-blue-600 dark:text-blue-400 hover:underline shrink-0"
-                            title="Retry"
-                          >
-                            [Retry]
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  ))}
-                  <div ref={logEndRef} />
-                </div>
-              </div>
-            </CardContent>
-          )}
-        </Card>
-      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Create Form */}
@@ -1053,44 +1112,140 @@ export default function LoraCreatorPage() {
               </div>
 
               <div className="space-y-2">
-                <Label>Training Images ({files.length})</Label>
-                <div
-                  {...getRootProps()}
-                  className={`border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors ${
-                    isDragActive
-                      ? 'border-primary bg-primary/5'
-                      : 'border-muted-foreground/25 hover:border-primary/50'
-                  } ${isCreating ? 'pointer-events-none opacity-50' : ''}`}
-                >
-                  <input {...getInputProps()} />
-                  <Upload className="w-8 h-8 mx-auto mb-2 text-muted-foreground" />
-                  {isDragActive ? (
-                    <p>Drop the images here...</p>
-                  ) : (
-                    <p className="text-muted-foreground">
-                      Drag & drop images, or click to select
-                    </p>
+                <Label>
+                  Training Images ({googleDriveZipUrl ? googleDriveImageCount : files.length})
+                  {googleDriveZipUrl && (
+                    <Badge variant="secondary" className="ml-2 text-xs">Google Drive</Badge>
                   )}
-                  <p className="text-xs text-muted-foreground mt-1">
-                    PNG, JPG, JPEG, WebP (5-20 images recommended)
-                  </p>
-                </div>
+                </Label>
+
+                {/* Google Drive Import Success State */}
+                {googleDriveZipUrl ? (
+                  <div className="border-2 border-primary/50 bg-primary/5 rounded-lg p-6 text-center">
+                    <CheckCircle className="w-8 h-8 mx-auto mb-2 text-primary" />
+                    <p className="font-medium">{googleDriveImageCount} images from Google Drive</p>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      Ready to start training
+                    </p>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="mt-3"
+                      onClick={clearGoogleDriveImport}
+                      disabled={isCreating}
+                    >
+                      <Trash2 className="w-4 h-4 mr-2" />
+                      Clear and upload different images
+                    </Button>
+                  </div>
+                ) : (
+                  <>
+                    <div
+                      {...getRootProps()}
+                      className={`border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors ${
+                        isDragActive
+                          ? 'border-primary bg-primary/5'
+                          : 'border-muted-foreground/25 hover:border-primary/50'
+                      } ${isCreating || isProcessingZip || isProcessingVideo ? 'pointer-events-none opacity-50' : ''}`}
+                    >
+                      <input {...getInputProps()} />
+                      {isProcessingZip ? (
+                        <>
+                          <Loader2 className="w-8 h-8 mx-auto mb-2 text-muted-foreground animate-spin" />
+                          <p className="text-muted-foreground">Extracting images from ZIP...</p>
+                        </>
+                      ) : isProcessingVideo ? (
+                        <>
+                          <Loader2 className="w-8 h-8 mx-auto mb-2 text-muted-foreground animate-spin" />
+                          <p className="text-muted-foreground">Extracting frames from video...</p>
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="w-8 h-8 mx-auto mb-2 text-muted-foreground" />
+                          {isDragActive ? (
+                            <p>Drop the files here...</p>
+                          ) : (
+                            <p className="text-muted-foreground">
+                              Drag & drop images, videos, or ZIP files
+                            </p>
+                          )}
+                          <p className="text-xs text-muted-foreground mt-1">
+                            Images (PNG, JPG, WebP), Videos (MP4, MOV), or ZIP
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            Videos will be frame-extracted automatically
+                          </p>
+                        </>
+                      )}
+                    </div>
+
+                    {/* Google Drive Import */}
+                    <div className="flex gap-2 mt-3">
+                      <Input
+                        placeholder="Google Drive folder URL..."
+                        value={googleDriveUrl}
+                        onChange={(e) => setGoogleDriveUrl(e.target.value)}
+                        disabled={isCreating || isImportingDrive}
+                        className="flex-1"
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={handleGoogleDriveImport}
+                        disabled={isCreating || isImportingDrive || !googleDriveUrl.trim()}
+                      >
+                        {isImportingDrive ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          'Import'
+                        )}
+                      </Button>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Paste a Google Drive folder link (folder must be publicly shared)
+                    </p>
+                  </>
+                )}
               </div>
 
               {files.length > 0 && (
                 <div className="space-y-2">
-                  <Label>Selected Images</Label>
-                  <div className="grid grid-cols-4 gap-2 max-h-48 overflow-y-auto">
-                    {files.map((file, index) => (
+                  <div className="flex items-center justify-between">
+                    <Label>Selected Images ({files.length})</Label>
+                    {files.length > PREVIEW_LIMIT && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => openGallery(0)}
+                        className="text-xs"
+                      >
+                        <Grid3X3 className="w-3 h-3 mr-1" />
+                        View All
+                      </Button>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-4 gap-2">
+                    {previewUrls.map((url, index) => (
                       <div key={index} className="relative group">
-                        <img
-                          src={URL.createObjectURL(file)}
-                          alt={file.name}
-                          className="w-full h-20 object-cover rounded"
-                        />
                         <button
                           type="button"
-                          onClick={() => removeFile(index)}
+                          onClick={() => openGallery(index)}
+                          className="w-full focus:outline-none focus:ring-2 focus:ring-primary rounded"
+                        >
+                          <img
+                            src={url}
+                            alt={files[index]?.name || `Image ${index + 1}`}
+                            className="w-full h-20 object-cover rounded"
+                          />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeFile(index);
+                          }}
                           className="absolute top-1 right-1 p-1 bg-destructive text-destructive-foreground rounded opacity-0 group-hover:opacity-100 transition-opacity"
                           disabled={isCreating}
                         >
@@ -1098,7 +1253,56 @@ export default function LoraCreatorPage() {
                         </button>
                       </div>
                     ))}
+                    {/* Show "+X more" indicator */}
+                    {files.length > PREVIEW_LIMIT && (
+                      <button
+                        type="button"
+                        onClick={() => openGallery(PREVIEW_LIMIT)}
+                        className="w-full h-20 bg-muted rounded flex flex-col items-center justify-center text-muted-foreground hover:bg-muted/80 transition-colors"
+                      >
+                        <Images className="w-5 h-5 mb-1" />
+                        <span className="text-xs font-medium">+{files.length - PREVIEW_LIMIT} more</span>
+                      </button>
+                    )}
                   </div>
+                </div>
+              )}
+
+              {/* HiRA Enable Toggle - Only show for non-style training */}
+              {!isStyle && files.length >= 3 && (
+                <div className="flex items-center justify-between rounded-lg border p-3">
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-2">
+                      <Label htmlFor="enableFaceIdentity" className="font-medium">HiRA Face Identity</Label>
+                      <Badge variant="secondary" className="text-xs">New</Badge>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Detect faces to verify identity and check for multiple people
+                    </p>
+                  </div>
+                  <Switch
+                    id="enableFaceIdentity"
+                    checked={enableFaceIdentity}
+                    onCheckedChange={setEnableFaceIdentity}
+                    disabled={isCreating}
+                  />
+                </div>
+              )}
+
+              {/* HiRA Face Identity - Show in detect mode (no loraId required) */}
+              {!isStyle && files.length >= 3 && enableFaceIdentity && (
+                <div className="border rounded-lg p-4">
+                  <FaceSelector
+                    imageUrls={files.map((file) => URL.createObjectURL(file))}
+                    mode="detect"
+                    onFaceProcessed={(result) => {
+                      setFaceProcessingResult(result);
+                    }}
+                    onPrimarySelected={(identityId, clusterIndex) => {
+                      setSelectedFaceIdentityId(identityId || `cluster-${clusterIndex}`);
+                    }}
+                    disabled={isCreating}
+                  />
                 </div>
               )}
 
@@ -1293,119 +1497,162 @@ export default function LoraCreatorPage() {
                   return (
                   <div
                     key={model.id}
-                    className={`flex items-center gap-3 p-3 border rounded-lg transition-all duration-300 ${
+                    className={`border rounded-lg transition-all duration-300 ${
                       isPendingDeletion ? 'opacity-50 bg-destructive/5 border-destructive/20' : ''
                     }`}
                   >
-                    {/* Thumbnail */}
-                    <div className="w-12 h-12 flex-shrink-0 bg-muted rounded overflow-hidden">
-                      {model.thumbnail_url ? (
-                        <img
-                          src={model.thumbnail_url}
-                          alt={model.name}
-                          className="w-full h-full object-cover"
-                        />
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center text-muted-foreground">
-                          <Upload className="w-5 h-5" />
-                        </div>
-                      )}
-                    </div>
-                    {/* Info */}
-                    <div className="flex-1 min-w-0 space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium truncate">{model.name}</span>
-                        {getStatusBadge(model.status)}
+                    <div className="flex items-center gap-3 p-3">
+                      {/* Thumbnail */}
+                      <div className="w-12 h-12 flex-shrink-0 bg-muted rounded overflow-hidden">
+                        {model.thumbnail_url ? (
+                          <img
+                            src={model.thumbnail_url}
+                            alt={model.name}
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-muted-foreground">
+                            <Upload className="w-5 h-5" />
+                          </div>
+                        )}
                       </div>
-                      <div className="text-sm text-muted-foreground">
-                        Trigger: <code className="bg-muted px-1 rounded">{model.trigger_word}</code>
-                      </div>
-                      {model.status === 'training' && (
-                        <div className="space-y-1">
-                          <Progress value={model.progress ?? 0} className="h-1 w-32" />
-                          {model.status_message && (
-                            <p className="text-xs text-muted-foreground truncate max-w-[200px]">
-                              {model.status_message}
-                            </p>
-                          )}
+                      {/* Info */}
+                      <div className="flex-1 min-w-0 space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium truncate">{model.name}</span>
+                          {getStatusBadge(model.status)}
                         </div>
-                      )}
-                      {model.status === 'pending' && model.status_message && (
-                        <p className="text-xs text-muted-foreground">{model.status_message}</p>
-                      )}
-                      {model.status === 'failed' && model.error_message && (
-                        <p className="text-xs text-destructive">{model.error_message}</p>
-                      )}
-                      {model.cost_cents !== null && model.cost_cents > 0 && (
-                        <p className="text-xs text-muted-foreground">
-                          Cost: ${(model.cost_cents / 100).toFixed(2)}
-                        </p>
-                      )}
+                        <div className="text-sm text-muted-foreground">
+                          Trigger: <code className="bg-muted px-1 rounded">{model.trigger_word}</code>
+                        </div>
+                        {model.status === 'training' && (
+                          <div className="space-y-1">
+                            <Progress value={model.progress ?? 0} className="h-1 w-32" />
+                          </div>
+                        )}
+                        {model.status === 'failed' && model.error_message && (
+                          <p className="text-xs text-destructive">{model.error_message}</p>
+                        )}
+                        {model.cost_cents !== null && model.cost_cents > 0 && (
+                          <p className="text-xs text-muted-foreground">
+                            Cost: ${(model.cost_cents / 100).toFixed(2)}
+                          </p>
+                        )}
+                      </div>
+                      {/* Actions */}
+                      <div className="flex gap-1">
+                        {isPendingDeletion ? (
+                          /* Undo button when pending deletion */
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => undoDelete(model.id)}
+                            className="text-xs"
+                          >
+                            <RotateCcw className="w-3 h-3 mr-1" />
+                            Undo
+                          </Button>
+                        ) : (
+                          <>
+                            {/* Cancel button for training/pending */}
+                            {(model.status === 'training' || model.status === 'pending') && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleCancel(model.id, model.name)}
+                                title="Cancel training"
+                                className="text-destructive hover:text-destructive"
+                              >
+                                <StopCircle className="w-4 h-4" />
+                              </Button>
+                            )}
+                            {/* Retry button for failed */}
+                            {model.status === 'failed' && model.training_images_url && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleRetry(model.id, model.name)}
+                                title="Retry training"
+                                className="text-blue-600 hover:text-blue-700"
+                              >
+                                <RotateCcw className="w-4 h-4" />
+                              </Button>
+                            )}
+                            {/* Edit button for ready */}
+                            {model.status === 'ready' && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => openRenameModal(model)}
+                                title="Edit"
+                              >
+                                <Pencil className="w-4 h-4" />
+                              </Button>
+                            )}
+                            {/* Delete button for ready/failed */}
+                            {(model.status === 'ready' || model.status === 'failed') && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleDelete(model.id)}
+                                title="Delete"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </Button>
+                            )}
+                          </>
+                        )}
+                      </div>
                     </div>
-                    {/* Actions */}
-                    <div className="flex gap-1">
-                      {isPendingDeletion ? (
-                        /* Undo button when pending deletion */
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => undoDelete(model.id)}
-                          className="text-xs"
-                        >
-                          <RotateCcw className="w-3 h-3 mr-1" />
-                          Undo
-                        </Button>
-                      ) : (
-                        <>
-                          {/* Cancel button for training/pending */}
-                          {(model.status === 'training' || model.status === 'pending') && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => handleCancel(model.id, model.name)}
-                              title="Cancel training"
-                              className="text-destructive hover:text-destructive"
-                            >
-                              <StopCircle className="w-4 h-4" />
-                            </Button>
-                          )}
-                          {/* Retry button for failed */}
-                          {model.status === 'failed' && model.training_images_url && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => handleRetry(model.id, model.name)}
-                              title="Retry training"
-                              className="text-blue-600 hover:text-blue-700"
-                            >
-                              <RotateCcw className="w-4 h-4" />
-                            </Button>
-                          )}
-                          {/* Edit button for ready */}
-                          {model.status === 'ready' && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => openRenameModal(model)}
-                              title="Edit"
-                            >
-                              <Pencil className="w-4 h-4" />
-                            </Button>
-                          )}
-                          {/* Delete button for ready/failed */}
-                          {(model.status === 'ready' || model.status === 'failed') && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => handleDelete(model.id)}
-                              title="Delete"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </Button>
-                          )}
-                        </>
-                      )}
-                    </div>
+                    {/* Inline Training Log for active models */}
+                    {(model.status === 'training' || model.status === 'pending') && (
+                      <div className="px-3 pb-3">
+                        <div className="pt-3 border-t">
+                          <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground mb-2">
+                            <Terminal className="w-3 h-3" />
+                            Training Log
+                          </div>
+                          <div className="bg-muted/50 rounded p-2 max-h-32 overflow-y-auto font-mono text-xs space-y-1">
+                            {trainingLog
+                              .filter(entry => entry.id === model.id)
+                              .slice(-10)
+                              .map((entry, idx) => (
+                                <div
+                                  key={`${entry.id}-${idx}`}
+                                  className={`flex items-start gap-2 ${
+                                    entry.status === 'failed' ? 'text-destructive' :
+                                    entry.status === 'ready' ? 'text-green-600 dark:text-green-400' :
+                                    'text-muted-foreground'
+                                  }`}
+                                >
+                                  <span className="shrink-0">
+                                    [{new Date(entry.timestamp).toLocaleTimeString()}]
+                                  </span>
+                                  <span className="flex-1">
+                                    {entry.status === 'training' && (
+                                      <span className="text-blue-600 dark:text-blue-400">
+                                        [{entry.progress}%] {entry.statusMessage}
+                                      </span>
+                                    )}
+                                    {entry.status === 'pending' && (
+                                      <span className="text-yellow-600 dark:text-yellow-400">
+                                        {entry.statusMessage}
+                                      </span>
+                                    )}
+                                  </span>
+                                </div>
+                              ))
+                            }
+                            {trainingLog.filter(entry => entry.id === model.id).length === 0 && model.status_message && (
+                              <div className="text-muted-foreground">
+                                {model.status === 'training' && `[${model.progress ?? 0}%] `}
+                                {model.status_message}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                   );
                 })}
@@ -1497,6 +1744,71 @@ export default function LoraCreatorPage() {
               </Button>
             </div>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Image Gallery Modal */}
+      <Dialog open={galleryOpen} onOpenChange={setGalleryOpen}>
+        <DialogContent className="max-w-4xl h-[80vh] p-0 gap-0">
+          <DialogHeader className="p-4 pb-2">
+            <DialogTitle className="flex items-center justify-between">
+              <span>Training Images</span>
+              <span className="text-sm font-normal text-muted-foreground">
+                {galleryIndex + 1} of {files.length}
+              </span>
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex-1 flex items-center justify-center bg-muted/30 relative overflow-hidden">
+            {files.length > 0 && (
+              <>
+                <img
+                  src={getGalleryUrl(galleryIndex)}
+                  alt={files[galleryIndex]?.name || `Image ${galleryIndex + 1}`}
+                  className="max-w-full max-h-full object-contain"
+                />
+                {/* Navigation buttons */}
+                <Button
+                  variant="secondary"
+                  size="icon"
+                  className="absolute left-4 top-1/2 -translate-y-1/2"
+                  onClick={prevImage}
+                >
+                  <ChevronLeft className="w-5 h-5" />
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="icon"
+                  className="absolute right-4 top-1/2 -translate-y-1/2"
+                  onClick={nextImage}
+                >
+                  <ChevronRight className="w-5 h-5" />
+                </Button>
+              </>
+            )}
+          </div>
+          <div className="p-4 pt-2 border-t">
+            <div className="flex items-center justify-between">
+              <div className="text-sm text-muted-foreground truncate max-w-[300px]">
+                {files[galleryIndex]?.name || `Image ${galleryIndex + 1}`}
+              </div>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => {
+                  removeFile(galleryIndex);
+                  if (galleryIndex >= files.length - 1 && galleryIndex > 0) {
+                    setGalleryIndex(galleryIndex - 1);
+                  }
+                  if (files.length <= 1) {
+                    setGalleryOpen(false);
+                  }
+                }}
+              >
+                <Trash2 className="w-4 h-4 mr-2" />
+                Remove
+              </Button>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

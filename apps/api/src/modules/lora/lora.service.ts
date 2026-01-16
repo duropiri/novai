@@ -1,8 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { SupabaseService, DbLoraModel } from '../files/supabase.service';
 import { JobsService } from '../jobs/jobs.service';
 import { DatasetAnalysisService, DatasetAnalysisResult } from '../../services/dataset-analysis.service';
 import { TrainingOptimizerService, OptimizedParameters } from '../../services/training-optimizer.service';
+import { FaceEmbeddingService, FaceIdentity, FaceDetectionResult } from '../../services/face-embedding.service';
+import { Face3DService, MeshGenerationResult } from '../../services/face-3d.service';
 
 export interface CreateLoraDto {
   name: string;
@@ -20,6 +22,9 @@ export interface CreateLoraDto {
   enableAnalysis?: boolean;
   analysisMode?: 'quick' | 'standard' | 'comprehensive';
   imageUrls?: string[]; // Individual image URLs for analysis (optional, if not using ZIP)
+  // HiRA (High Rank Adaptation) face identity options
+  enableFaceIdentity?: boolean; // Enable HiRA face detection and identity tracking
+  primaryFaceIdentityId?: string; // Pre-selected face identity to use
 }
 
 export interface UploadLoraDto {
@@ -38,6 +43,20 @@ export interface ImportLoraDto {
   thumbnailUrl?: string;
 }
 
+// HiRA face processing result
+export interface FaceProcessingResult {
+  totalFaces: number;
+  clusters: Array<{
+    clusterIndex: number;
+    faceCount: number;
+    matchedIdentity?: { id: string; name?: string; similarity: number };
+    detectionIds: string[];
+  }>;
+  primaryIdentity?: FaceIdentity;
+  newIdentities: FaceIdentity[];
+  angleCoverage: Record<string, { angle: string; quality: number }[]>;
+}
+
 @Injectable()
 export class LoraService {
   private readonly logger = new Logger(LoraService.name);
@@ -47,6 +66,8 @@ export class LoraService {
     private readonly jobsService: JobsService,
     private readonly datasetAnalysis: DatasetAnalysisService,
     private readonly trainingOptimizer: TrainingOptimizerService,
+    @Optional() private readonly faceEmbeddingService?: FaceEmbeddingService,
+    @Optional() private readonly face3DService?: Face3DService,
   ) {}
 
   private checkInitialized(): void {
@@ -554,5 +575,225 @@ export class LoraService {
     } catch {
       return null;
     }
+  }
+
+  // ============================================
+  // HiRA (High Rank Adaptation) Face Identity Methods
+  // ============================================
+
+  /**
+   * Process training images to detect, cluster, and identify faces
+   * This is the main entry point for HiRA face processing
+   */
+  async processTrainingFaces(
+    loraId: string,
+    imageUrls: string[],
+  ): Promise<FaceProcessingResult> {
+    if (!this.faceEmbeddingService) {
+      throw new Error('Face embedding service not available');
+    }
+
+    this.logger.log(`Processing ${imageUrls.length} images for HiRA face detection (LoRA: ${loraId})`);
+
+    // Step 1: Detect all faces in images
+    const { detections, byImage } = await this.faceEmbeddingService.detectFacesInImages(imageUrls);
+    this.logger.log(`Detected ${detections.length} faces across all images`);
+
+    // Step 2: Cluster faces by identity
+    const { clusters, unclusteredDetections } = await this.faceEmbeddingService.clusterFacesByIdentity(detections);
+    this.logger.log(`Created ${clusters.length} face clusters`);
+
+    // Step 3: Create/update identities for each cluster
+    const newIdentities: FaceIdentity[] = [];
+    const clusterResults: FaceProcessingResult['clusters'] = [];
+
+    for (let i = 0; i < clusters.length; i++) {
+      const cluster = clusters[i];
+      const identityMap = new Map<FaceDetectionResult, string>();
+
+      if (cluster.matchedIdentity?.isMatch) {
+        // Update existing identity
+        cluster.detections.forEach((d) => identityMap.set(d, cluster.matchedIdentity!.identityId));
+        await this.faceEmbeddingService.updateIdentityWithDetections(
+          cluster.matchedIdentity.identityId,
+          cluster.detections,
+        );
+      } else {
+        // Create new identity
+        const newIdentity = await this.faceEmbeddingService.createIdentity({
+          detections: cluster.detections,
+          sourceType: 'lora_training',
+          sourceId: loraId,
+        });
+        newIdentities.push(newIdentity);
+        cluster.detections.forEach((d) => identityMap.set(d, newIdentity.id));
+      }
+
+      // Store detections
+      const detectionIds = await this.faceEmbeddingService.storeDetections(
+        cluster.detections,
+        'lora_training',
+        loraId,
+        identityMap,
+      );
+
+      clusterResults.push({
+        clusterIndex: i,
+        faceCount: cluster.detections.length,
+        matchedIdentity: cluster.matchedIdentity?.isMatch
+          ? {
+              id: cluster.matchedIdentity.identityId,
+              name: cluster.matchedIdentity.identityName,
+              similarity: cluster.matchedIdentity.similarity,
+            }
+          : undefined,
+        detectionIds,
+      });
+    }
+
+    // Step 4: Determine primary identity (largest cluster)
+    const largestCluster = clusterResults.reduce((max, cluster) =>
+      cluster.faceCount > max.faceCount ? cluster : max,
+    );
+    const primaryIdentityId = largestCluster.matchedIdentity?.id || newIdentities[0]?.id;
+
+    let primaryIdentity: FaceIdentity | undefined;
+    if (primaryIdentityId) {
+      primaryIdentity = await this.faceEmbeddingService.getIdentity(primaryIdentityId) || undefined;
+
+      // Update LoRA model with primary face identity
+      await this.supabase.getClient()
+        .from('lora_models')
+        .update({
+          primary_face_identity_id: primaryIdentityId,
+          detected_faces: clusterResults.map((c) => ({
+            detectionIds: c.detectionIds,
+            identityId: c.matchedIdentity?.id,
+            faceCount: c.faceCount,
+            isPrimary: c === largestCluster,
+          })),
+        })
+        .eq('id', loraId);
+    }
+
+    // Step 5: Calculate angle coverage for each identity
+    const angleCoverage: FaceProcessingResult['angleCoverage'] = {};
+    for (const cluster of clusters) {
+      const identityId = cluster.matchedIdentity?.identityId || 'new';
+      if (this.face3DService) {
+        const angles = this.face3DService.collectAngleImages(cluster.detections);
+        angleCoverage[identityId] = Object.entries(angles)
+          .filter(([, url]) => url)
+          .map(([angle, url]) => ({
+            angle,
+            quality: cluster.detections.find((d) => d.imageUrl === url)?.qualityScore || 0.5,
+          }));
+      }
+    }
+
+    this.logger.log(`HiRA processing complete: ${newIdentities.length} new identities, primary=${primaryIdentityId}`);
+
+    return {
+      totalFaces: detections.length,
+      clusters: clusterResults,
+      primaryIdentity,
+      newIdentities,
+      angleCoverage,
+    };
+  }
+
+  /**
+   * Generate 3D face mesh for the primary identity of a LoRA model
+   */
+  async generateFaceMesh(loraId: string): Promise<MeshGenerationResult | null> {
+    if (!this.face3DService) {
+      throw new Error('Face 3D service not available');
+    }
+
+    const model = await this.supabase.getLoraModel(loraId);
+    if (!model?.primary_face_identity_id) {
+      throw new Error('No primary face identity set for this LoRA model');
+    }
+
+    return this.face3DService.generateMeshForIdentity(model.primary_face_identity_id);
+  }
+
+  /**
+   * Set the primary face identity for a LoRA model
+   */
+  async setPrimaryFaceIdentity(loraId: string, identityId: string): Promise<void> {
+    this.logger.log(`Setting primary face identity for LoRA ${loraId} to ${identityId}`);
+
+    await this.supabase.getClient()
+      .from('lora_models')
+      .update({ primary_face_identity_id: identityId })
+      .eq('id', loraId);
+
+    // Also update detections to mark the correct one as primary
+    if (this.faceEmbeddingService) {
+      // Get all detections for this LoRA
+      const { data: detections } = await this.supabase.getClient()
+        .from('face_detections')
+        .select('id, matched_identity_id')
+        .eq('source_type', 'lora_training')
+        .eq('source_id', loraId);
+
+      if (detections) {
+        // Unmark all as non-primary
+        await this.supabase.getClient()
+          .from('face_detections')
+          .update({ is_primary: false })
+          .eq('source_type', 'lora_training')
+          .eq('source_id', loraId);
+
+        // Mark detections matching the identity as primary
+        await this.supabase.getClient()
+          .from('face_detections')
+          .update({ is_primary: true })
+          .eq('source_type', 'lora_training')
+          .eq('source_id', loraId)
+          .eq('matched_identity_id', identityId);
+      }
+    }
+  }
+
+  /**
+   * Get face processing results for a LoRA model
+   */
+  async getFaceResults(loraId: string): Promise<{
+    primaryIdentity?: FaceIdentity;
+    allIdentities: FaceIdentity[];
+    detectedFaces: any;
+  } | null> {
+    const model = await this.supabase.getLoraModel(loraId);
+    if (!model) return null;
+
+    const allIdentities: FaceIdentity[] = [];
+
+    // Get all identities linked to this LoRA
+    const { data: identities } = await this.supabase.getClient()
+      .from('face_identities')
+      .select('*')
+      .eq('source_type', 'lora_training')
+      .eq('source_id', loraId);
+
+    if (identities && this.faceEmbeddingService) {
+      for (const identity of identities) {
+        const mapped = await this.faceEmbeddingService.getIdentity(identity.id);
+        if (mapped) allIdentities.push(mapped);
+      }
+    }
+
+    // Get primary identity if set
+    let primaryIdentity: FaceIdentity | undefined;
+    if (model.primary_face_identity_id && this.faceEmbeddingService) {
+      primaryIdentity = await this.faceEmbeddingService.getIdentity(model.primary_face_identity_id) || undefined;
+    }
+
+    return {
+      primaryIdentity,
+      allIdentities,
+      detectedFaces: model.detected_faces,
+    };
   }
 }

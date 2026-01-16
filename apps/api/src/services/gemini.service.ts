@@ -1,10 +1,17 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { GoogleGenAI, GenerateContentConfig } from '@google/genai';
+import { SupabaseService } from '../modules/files/supabase.service';
 
 export interface CharacterDiagramResult {
   imageBase64: string;
   mimeType: string;
+}
+
+export interface GeneratedImage {
+  url: string;
+  width: number;
+  height: number;
 }
 
 @Injectable()
@@ -14,7 +21,11 @@ export class GeminiService {
   private ai: GoogleGenAI | null = null;
   private readonly model = 'gemini-3-pro-image-preview'; // Nano Banana Pro
 
-  constructor(private configService: ConfigService) {
+  constructor(
+    private configService: ConfigService,
+    @Inject(forwardRef(() => SupabaseService))
+    private supabase: SupabaseService,
+  ) {
     this.apiKey = this.configService.get<string>('GOOGLE_GEMINI_API_KEY') || '';
     if (!this.apiKey) {
       this.logger.warn('GOOGLE_GEMINI_API_KEY not configured. Gemini operations will fail.');
@@ -653,6 +664,215 @@ Output: 2K resolution, photorealistic, highest quality.`;
     });
 
     return response.text || '';
+  }
+
+  // ============================================
+  // NANO BANANA IMAGE GENERATION (Direct Gemini API)
+  // ============================================
+
+  /**
+   * Generate images using Gemini's Nano Banana Pro model directly
+   * This uses your own Gemini API key instead of going through fal.ai
+   *
+   * @param prompt - The image generation prompt
+   * @param numImages - Number of images to generate (1-4)
+   * @param aspectRatio - Output aspect ratio
+   * @param onProgress - Optional progress callback
+   * @returns Array of generated images as base64
+   */
+  async generateImages(input: {
+    prompt: string;
+    num_images?: number;
+    aspect_ratio?: '21:9' | '16:9' | '3:2' | '4:3' | '5:4' | '1:1' | '4:5' | '3:4' | '2:3' | '9:16';
+    onProgress?: (status: { status: string }) => void;
+  }): Promise<Array<{ base64: string; mimeType: string }>> {
+    if (!this.ai) {
+      throw new Error('Gemini API not configured');
+    }
+
+    const numImages = input.num_images ?? 1;
+    this.logger.log(`Generating ${numImages} image(s) with Nano Banana Pro (Direct Gemini API)`);
+    this.logger.log(`Prompt: ${input.prompt.substring(0, 100)}...`);
+
+    if (input.onProgress) {
+      input.onProgress({ status: 'IN_QUEUE' });
+    }
+
+    const results: Array<{ base64: string; mimeType: string }> = [];
+
+    // Generate images one at a time (Gemini generates one image per request)
+    for (let i = 0; i < numImages; i++) {
+      if (input.onProgress) {
+        input.onProgress({ status: 'IN_PROGRESS' });
+      }
+
+      const config: GenerateContentConfig = {
+        responseModalities: ['IMAGE', 'TEXT'],
+        imageConfig: {
+          aspectRatio: input.aspect_ratio ?? '1:1',
+          imageSize: '1K',
+        },
+      };
+
+      const contents = [
+        {
+          role: 'user',
+          parts: [{ text: input.prompt }],
+        },
+      ];
+
+      try {
+        const response = await this.ai.models.generateContentStream({
+          model: this.model,
+          config,
+          contents,
+        });
+
+        let imageBase64: string | null = null;
+        let imageMimeType: string | null = null;
+        const textResponses: string[] = [];
+        let blockedBySafety = false;
+        let finishReason: string | null = null;
+
+        for await (const chunk of response) {
+          const candidate = chunk.candidates?.[0];
+          if (candidate?.finishReason) {
+            finishReason = candidate.finishReason;
+            if (finishReason === 'SAFETY' || finishReason === 'IMAGE_SAFETY') {
+              blockedBySafety = true;
+              this.logger.warn(`Image ${i + 1}: Blocked by safety filter (${finishReason})`);
+            }
+          }
+
+          if (!candidate?.content?.parts) {
+            continue;
+          }
+
+          for (const part of candidate.content.parts) {
+            if (part && 'inlineData' in part && part.inlineData) {
+              imageBase64 = part.inlineData.data || null;
+              imageMimeType = part.inlineData.mimeType || null;
+              this.logger.log(`Image ${i + 1}/${numImages} received from Gemini`);
+            } else if (part && 'text' in part && part.text) {
+              textResponses.push(part.text);
+            }
+          }
+        }
+
+        if (blockedBySafety) {
+          this.logger.warn(`Image ${i + 1}: Skipped due to safety filter`);
+          continue;
+        }
+
+        if (imageBase64 && imageMimeType) {
+          results.push({ base64: imageBase64, mimeType: imageMimeType });
+        } else {
+          const textSummary = textResponses.join(' ').slice(0, 200);
+          this.logger.warn(`Image ${i + 1}: No image returned. Text: ${textSummary}`);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        this.logger.error(`Image ${i + 1} generation failed: ${message}`);
+        // Continue with remaining images
+      }
+    }
+
+    if (results.length === 0) {
+      throw new Error('No images were generated successfully');
+    }
+
+    if (input.onProgress) {
+      input.onProgress({ status: 'COMPLETED' });
+    }
+
+    this.logger.log(`Generated ${results.length}/${numImages} images successfully`);
+    return results;
+  }
+
+  /**
+   * Generate images and upload to Supabase, returning URLs
+   * This is a drop-in replacement for falService.runNanoBananaGeneration
+   *
+   * @param prompt - The image generation prompt
+   * @param numImages - Number of images to generate (1-4)
+   * @param aspectRatio - Output aspect ratio
+   * @param onProgress - Optional progress callback
+   * @returns Object with images array containing URLs
+   */
+  async runNanoBananaGeneration(input: {
+    prompt: string;
+    num_images?: number;
+    aspect_ratio?: '21:9' | '16:9' | '3:2' | '4:3' | '5:4' | '1:1' | '4:5' | '3:4' | '2:3' | '9:16';
+    output_format?: 'jpeg' | 'png' | 'webp'; // Ignored for Gemini, always returns PNG
+    onProgress?: (status: { status: string }) => void;
+  }): Promise<{ images: GeneratedImage[] }> {
+    // Generate images using direct Gemini API
+    const base64Images = await this.generateImages({
+      prompt: input.prompt,
+      num_images: input.num_images,
+      aspect_ratio: input.aspect_ratio,
+      onProgress: input.onProgress,
+    });
+
+    // Upload each image to Supabase and get URLs
+    const uploadedImages: GeneratedImage[] = [];
+    const uploadPrefix = `generated-images/${Date.now()}`;
+
+    for (let i = 0; i < base64Images.length; i++) {
+      const img = base64Images[i];
+      const extension = img.mimeType.includes('png') ? 'png' : 'jpg';
+      const uploadPath = `${uploadPrefix}/image_${i}.${extension}`;
+
+      try {
+        const buffer = Buffer.from(img.base64, 'base64');
+        const { url } = await this.supabase.uploadFile(
+          'generated-images',
+          uploadPath,
+          buffer,
+          img.mimeType,
+        );
+
+        // Estimate dimensions based on aspect ratio
+        const dimensions = this.getAspectRatioDimensions(input.aspect_ratio ?? '1:1');
+
+        uploadedImages.push({
+          url,
+          width: dimensions.width,
+          height: dimensions.height,
+        });
+
+        this.logger.log(`Uploaded image ${i + 1}/${base64Images.length}: ${url}`);
+      } catch (uploadError) {
+        const message = uploadError instanceof Error ? uploadError.message : 'Unknown error';
+        this.logger.error(`Failed to upload image ${i + 1}: ${message}`);
+        // Continue with remaining images
+      }
+    }
+
+    if (uploadedImages.length === 0) {
+      throw new Error('Failed to upload any generated images');
+    }
+
+    return { images: uploadedImages };
+  }
+
+  /**
+   * Get approximate pixel dimensions for an aspect ratio at 1K resolution
+   */
+  private getAspectRatioDimensions(aspectRatio: string): { width: number; height: number } {
+    const ratioMap: Record<string, { width: number; height: number }> = {
+      '21:9': { width: 1536, height: 640 },
+      '16:9': { width: 1344, height: 768 },
+      '3:2': { width: 1216, height: 832 },
+      '4:3': { width: 1152, height: 896 },
+      '5:4': { width: 1088, height: 896 },
+      '1:1': { width: 1024, height: 1024 },
+      '4:5': { width: 896, height: 1088 },
+      '3:4': { width: 896, height: 1152 },
+      '2:3': { width: 832, height: 1216 },
+      '9:16': { width: 768, height: 1344 },
+    };
+    return ratioMap[aspectRatio] || { width: 1024, height: 1024 };
   }
 
   /**

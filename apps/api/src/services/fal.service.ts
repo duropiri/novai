@@ -970,13 +970,13 @@ export class FalService implements OnModuleInit {
   }
 
   // ============================================
-  // NANO BANANA IMAGE GENERATION (Primary)
+  // NANO BANANA IMAGE GENERATION (Legacy - use GeminiService instead)
   // ============================================
 
   /**
+   * @deprecated Use GeminiService.runNanoBananaGeneration instead - uses your own Gemini API key
    * Run Nano Banana (Gemini 2.5 Flash Image) generation via fal.ai
-   * This is the primary image generation method - fast, high quality, $0.039/image
-   * Does not use LoRAs - for character consistency, use with face swap
+   * This method goes through fal.ai which incurs additional costs
    */
   async runNanoBananaGeneration(input: {
     prompt: string;
@@ -1957,6 +1957,269 @@ export class FalService implements OnModuleInit {
 
       default:
         throw new Error(`Unknown upscale method: ${method}`);
+    }
+  }
+
+  // ==================== FACE DETECTION & EMBEDDING (HiRA) ====================
+
+  /**
+   * Detect faces in an image using InsightFace
+   * Returns bounding boxes, landmarks, and embeddings for each face
+   */
+  async detectFaces(input: {
+    image_url: string;
+    detection_threshold?: number;
+    return_embeddings?: boolean;
+  }): Promise<{
+    faces: Array<{
+      bbox: { x: number; y: number; width: number; height: number };
+      confidence: number;
+      landmarks?: Array<{ x: number; y: number }>;
+      embedding?: number[];
+      age?: number;
+      gender?: 'male' | 'female';
+    }>;
+    image_width: number;
+    image_height: number;
+  }> {
+    this.logger.log('Running InsightFace face detection');
+
+    try {
+      // Use fal.ai's face detection endpoint
+      const result = await fal.subscribe('fal-ai/insightface', {
+        input: {
+          image_url: input.image_url,
+          det_thresh: input.detection_threshold ?? 0.5,
+          return_face_embeddings: input.return_embeddings ?? true,
+        },
+        logs: true,
+      });
+
+      const typedResult = result.data as {
+        faces: Array<{
+          bbox: [number, number, number, number]; // x1, y1, x2, y2
+          det_score: number;
+          kps?: Array<[number, number]>; // 5-point landmarks
+          embedding?: number[];
+          age?: number;
+          gender?: number; // 0 = male, 1 = female
+        }>;
+        image_size: { width: number; height: number };
+      };
+
+      // Transform to our interface
+      const faces = (typedResult.faces || []).map((face) => ({
+        bbox: {
+          x: face.bbox[0],
+          y: face.bbox[1],
+          width: face.bbox[2] - face.bbox[0],
+          height: face.bbox[3] - face.bbox[1],
+        },
+        confidence: face.det_score,
+        landmarks: face.kps?.map(([x, y]) => ({ x, y })),
+        embedding: face.embedding,
+        age: face.age,
+        gender: face.gender === 0 ? 'male' as const : face.gender === 1 ? 'female' as const : undefined,
+      }));
+
+      this.logger.log(`Detected ${faces.length} face(s)`);
+
+      return {
+        faces,
+        image_width: typedResult.image_size?.width || 0,
+        image_height: typedResult.image_size?.height || 0,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Face detection failed: ${message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Generate face embedding for a cropped face image
+   */
+  async generateFaceEmbedding(input: {
+    image_url: string;
+  }): Promise<{
+    embedding: number[];
+    confidence: number;
+  }> {
+    this.logger.log('Generating face embedding');
+
+    // Detect faces and return the embedding of the largest/most prominent face
+    const result = await this.detectFaces({
+      image_url: input.image_url,
+      return_embeddings: true,
+    });
+
+    if (result.faces.length === 0) {
+      throw new Error('No face detected in image');
+    }
+
+    // Get the largest face (by area)
+    const largestFace = result.faces.reduce((largest, face) => {
+      const currentArea = face.bbox.width * face.bbox.height;
+      const largestArea = largest.bbox.width * largest.bbox.height;
+      return currentArea > largestArea ? face : largest;
+    });
+
+    if (!largestFace.embedding) {
+      throw new Error('Face embedding not generated');
+    }
+
+    return {
+      embedding: largestFace.embedding,
+      confidence: largestFace.confidence,
+    };
+  }
+
+  /**
+   * Compare two face embeddings using cosine similarity
+   * Returns similarity score (0-1, higher = more similar)
+   */
+  compareFaceEmbeddings(embedding1: number[], embedding2: number[]): number {
+    if (embedding1.length !== embedding2.length) {
+      throw new Error('Embedding dimensions do not match');
+    }
+
+    // Cosine similarity
+    let dotProduct = 0;
+    let norm1 = 0;
+    let norm2 = 0;
+
+    for (let i = 0; i < embedding1.length; i++) {
+      dotProduct += embedding1[i] * embedding2[i];
+      norm1 += embedding1[i] * embedding1[i];
+      norm2 += embedding2[i] * embedding2[i];
+    }
+
+    if (norm1 === 0 || norm2 === 0) return 0;
+
+    return dotProduct / (Math.sqrt(norm1) * Math.sqrt(norm2));
+  }
+
+  /**
+   * Estimate head pose/angle from euler angles
+   */
+  estimateFaceAngle(eulerAngles: { pitch: number; yaw: number; roll: number }):
+    'front' | 'profile_left' | 'profile_right' | 'quarter_left' | 'quarter_right' | 'other' {
+    const { yaw } = eulerAngles;
+    const absYaw = Math.abs(yaw);
+
+    if (absYaw < 15) return 'front';
+    if (absYaw >= 15 && absYaw < 50) return yaw > 0 ? 'quarter_right' : 'quarter_left';
+    if (absYaw >= 50 && absYaw < 90) return yaw > 0 ? 'profile_right' : 'profile_left';
+    return 'other';
+  }
+
+  // ==================== 3D FACE MESH GENERATION (Meshy) ====================
+
+  /**
+   * Generate a 3D mesh from multiple face images using Meshy
+   * Requires front + profile + 3/4 angle for best results
+   */
+  async generateFaceMesh(input: {
+    image_urls: string[]; // 1-4 images from different angles
+    topology?: 'quad' | 'triangle';
+    target_polycount?: number;
+    enable_texture?: boolean;
+  }): Promise<{
+    model_url: string; // GLB file URL
+    thumbnail_url: string;
+    texture_urls?: string[];
+  }> {
+    this.logger.log(`Generating 3D face mesh from ${input.image_urls.length} image(s)`);
+
+    if (input.image_urls.length === 0) {
+      throw new Error('At least one image is required');
+    }
+
+    try {
+      // Use Meshy v5 for multi-image 3D generation
+      const isMultiImage = input.image_urls.length > 1;
+      const endpoint = isMultiImage
+        ? 'fal-ai/meshy/v5/multi-image-to-3d'
+        : 'fal-ai/meshy/v6-preview/image-to-3d';
+
+      // Build input based on single vs multi-image
+      const apiInput: Record<string, unknown> = {
+        topology: input.topology ?? 'quad',
+        target_polycount: input.target_polycount ?? 30000,
+        enable_texture: input.enable_texture ?? true,
+        symmetry_mode: 'auto',
+      };
+
+      if (isMultiImage) {
+        apiInput.image_urls = input.image_urls;
+      } else {
+        apiInput.image_url = input.image_urls[0];
+      }
+
+      const result = await fal.subscribe(endpoint, {
+        input: apiInput as Parameters<typeof fal.subscribe>[1]['input'],
+        logs: true,
+        pollInterval: 3000, // 3D mesh generation can take a while
+      });
+
+      const typedResult = result.data as {
+        model_file?: { url: string };
+        model_urls?: { glb?: string };
+        thumbnail_url?: string;
+        texture_urls?: string[];
+      };
+
+      const modelUrl = typedResult.model_file?.url || typedResult.model_urls?.glb;
+
+      if (!modelUrl) {
+        throw new Error('No model URL in response');
+      }
+
+      this.logger.log('3D face mesh generation completed');
+
+      return {
+        model_url: modelUrl,
+        thumbnail_url: typedResult.thumbnail_url || '',
+        texture_urls: typedResult.texture_urls,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`3D mesh generation failed: ${message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Generate depth map from an image using Depth Anything v2
+   */
+  async generateDepthMap(input: {
+    image_url: string;
+  }): Promise<{
+    depth_map_url: string;
+  }> {
+    this.logger.log('Generating depth map');
+
+    try {
+      const result = await fal.subscribe('fal-ai/depth-anything/v2', {
+        input: {
+          image_url: input.image_url,
+        },
+        logs: true,
+      });
+
+      const typedResult = result.data as {
+        image: { url: string };
+      };
+
+      this.logger.log('Depth map generation completed');
+
+      return {
+        depth_map_url: typedResult.image.url,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Depth map generation failed: ${message}`);
+      throw error;
     }
   }
 }

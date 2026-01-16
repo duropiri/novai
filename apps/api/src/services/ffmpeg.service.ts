@@ -136,25 +136,33 @@ export class FFmpegService {
 
       this.logger.log(`Extracted ${sortedFrames.length} frames`);
 
-      // Upload frames and return URLs
-      const frameUrls: string[] = [];
-      for (let i = 0; i < sortedFrames.length; i++) {
-        const framePath = path.join(framesDir, sortedFrames[i]);
-        const frameBuffer = await fs.readFile(framePath);
-        const uploadPath = `${uploadPrefix}/frame_${String(i).padStart(5, '0')}.png`;
+      // Upload frames in parallel batches for faster processing
+      const BATCH_SIZE = 10;
+      const frameUrls: string[] = new Array(sortedFrames.length);
 
-        const { url } = await this.supabase.uploadFile(
-          'processed-videos',
-          uploadPath,
-          frameBuffer,
-          'image/png',
-        );
-        frameUrls.push(url);
+      for (let batchStart = 0; batchStart < sortedFrames.length; batchStart += BATCH_SIZE) {
+        const batchEnd = Math.min(batchStart + BATCH_SIZE, sortedFrames.length);
+        const batchPromises = [];
 
-        // Log progress every 10 frames
-        if ((i + 1) % 10 === 0 || i === sortedFrames.length - 1) {
-          this.logger.log(`Uploaded ${i + 1}/${sortedFrames.length} frames`);
+        for (let i = batchStart; i < batchEnd; i++) {
+          const framePath = path.join(framesDir, sortedFrames[i]);
+          const uploadPath = `${uploadPrefix}/frame_${String(i).padStart(5, '0')}.png`;
+
+          batchPromises.push(
+            fs.readFile(framePath).then(async (frameBuffer) => {
+              const { url } = await this.supabase.uploadFile(
+                'processed-videos',
+                uploadPath,
+                frameBuffer,
+                'image/png',
+              );
+              frameUrls[i] = url;
+            })
+          );
         }
+
+        await Promise.all(batchPromises);
+        this.logger.log(`Uploaded ${batchEnd}/${sortedFrames.length} frames`);
       }
 
       return frameUrls;
@@ -179,15 +187,22 @@ export class FFmpegService {
       const framesDir = path.join(tempDir, 'frames');
       await fs.mkdir(framesDir, { recursive: true });
 
-      // Download all frames
+      // Download frames in parallel batches for faster processing
+      // Use downloadImageAsPng to handle JPEG images returned by face swap services
+      const BATCH_SIZE = 10;
       this.logger.log(`Downloading ${frameUrls.length} frames...`);
-      for (let i = 0; i < frameUrls.length; i++) {
-        const framePath = path.join(framesDir, `frame_${String(i).padStart(5, '0')}.png`);
-        await this.downloadFile(frameUrls[i], framePath);
 
-        if ((i + 1) % 10 === 0 || i === frameUrls.length - 1) {
-          this.logger.log(`Downloaded ${i + 1}/${frameUrls.length} frames`);
+      for (let batchStart = 0; batchStart < frameUrls.length; batchStart += BATCH_SIZE) {
+        const batchEnd = Math.min(batchStart + BATCH_SIZE, frameUrls.length);
+        const batchPromises = [];
+
+        for (let i = batchStart; i < batchEnd; i++) {
+          const framePath = path.join(framesDir, `frame_${String(i).padStart(5, '0')}.png`);
+          batchPromises.push(this.downloadImageAsPng(frameUrls[i], framePath));
         }
+
+        await Promise.all(batchPromises);
+        this.logger.log(`Downloaded ${batchEnd}/${frameUrls.length} frames`);
       }
 
       // Build ffmpeg command
@@ -323,10 +338,10 @@ export class FFmpegService {
       const framesDir = path.join(tempDir, 'frames');
       await fs.mkdir(framesDir, { recursive: true });
 
-      // Download frames
+      // Download frames (convert to PNG if needed)
       for (let i = 0; i < frameUrls.length; i++) {
         const framePath = path.join(framesDir, `${String(i).padStart(3, '0')}.png`);
-        await this.downloadFile(frameUrls[i], framePath);
+        await this.downloadImageAsPng(frameUrls[i], framePath);
       }
 
       // Create ZIP
@@ -376,5 +391,61 @@ export class FFmpegService {
     }
     const arrayBuffer = await response.arrayBuffer();
     await fs.writeFile(destPath, Buffer.from(arrayBuffer));
+  }
+
+  /**
+   * Download image and convert to PNG if needed
+   * Handles JPEG images that need to be saved as PNG for ffmpeg
+   */
+  private async downloadImageAsPng(url: string, destPath: string): Promise<void> {
+    // Handle data URLs
+    if (url.startsWith('data:')) {
+      const base64Data = url.split(',')[1];
+      const buffer = Buffer.from(base64Data, 'base64');
+
+      // Check if it's already PNG
+      if (this.isPngBuffer(buffer)) {
+        await fs.writeFile(destPath, buffer);
+        return;
+      }
+
+      // Convert to PNG using ffmpeg
+      const tempPath = destPath.replace('.png', '_temp.jpg');
+      await fs.writeFile(tempPath, buffer);
+      await execAsync(`ffmpeg -i "${tempPath}" -y "${destPath}"`);
+      await fs.unlink(tempPath).catch(() => {});
+      return;
+    }
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to download file: ${response.statusText}`);
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    // Check if it's already PNG (magic bytes: 89 50 4E 47)
+    if (this.isPngBuffer(buffer)) {
+      await fs.writeFile(destPath, buffer);
+      return;
+    }
+
+    // It's likely JPEG or another format - convert to PNG using ffmpeg
+    const tempPath = destPath.replace('.png', '_temp.jpg');
+    await fs.writeFile(tempPath, buffer);
+    await execAsync(`ffmpeg -i "${tempPath}" -y "${destPath}"`);
+    await fs.unlink(tempPath).catch(() => {});
+  }
+
+  /**
+   * Check if buffer is PNG format by magic bytes
+   */
+  private isPngBuffer(buffer: Buffer): boolean {
+    // PNG magic bytes: 89 50 4E 47 0D 0A 1A 0A
+    return buffer.length >= 8 &&
+      buffer[0] === 0x89 &&
+      buffer[1] === 0x50 &&
+      buffer[2] === 0x4E &&
+      buffer[3] === 0x47;
   }
 }

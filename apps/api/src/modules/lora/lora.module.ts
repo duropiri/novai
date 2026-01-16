@@ -10,6 +10,9 @@ import { DatasetAnalysisService } from '../../services/dataset-analysis.service'
 import { TrainingOptimizerService } from '../../services/training-optimizer.service';
 import { IdentityAnalysisService } from '../../services/identity-analysis.service';
 import { GeminiService } from '../../services/gemini.service';
+// HiRA (High Rank Adaptation) face identity services
+import { FaceEmbeddingService } from '../../services/face-embedding.service';
+import { Face3DService } from '../../services/face-3d.service';
 
 @Module({
   imports: [
@@ -25,6 +28,9 @@ import { GeminiService } from '../../services/gemini.service';
     TrainingOptimizerService,
     IdentityAnalysisService,
     GeminiService,
+    // HiRA face services
+    FaceEmbeddingService,
+    Face3DService,
   ],
   exports: [LoraService, FalService],
 })

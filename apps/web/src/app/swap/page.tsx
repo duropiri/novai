@@ -54,11 +54,13 @@ import {
   VideoModelSelector,
   UpscaleSelector,
   SkeletonPreviewPanel,
+  PresetSelector,
   getVideoModelCost,
   getUpscaleCost,
   type VideoModel,
   type UpscaleMethod,
   type UpscaleResolution,
+  type SwapPresetSettings,
 } from './components';
 
 // Strategy definitions
@@ -110,7 +112,7 @@ export default function AISwapperPage() {
   // Column 2: Target Face
   type FaceSource = 'upload' | 'diagram' | 'kit';
   const [faceSource, setFaceSource] = useState<FaceSource>('diagram');
-  const [uploadedFaceUrl, setUploadedFaceUrl] = useState<string | null>(null);
+  const [uploadedFaceUrls, setUploadedFaceUrls] = useState<string[]>([]);
   const [selectedDiagram, setSelectedDiagram] = useState<CharacterDiagram | null>(null);
   const [selectedReferenceKit, setSelectedReferenceKit] = useState<ReferenceKit | null>(null);
 
@@ -254,7 +256,7 @@ export default function AISwapperPage() {
 
   // === VALIDATION ===
   const hasTargetFace =
-    (faceSource === 'upload' && uploadedFaceUrl) ||
+    (faceSource === 'upload' && uploadedFaceUrls.length > 0) ||
     (faceSource === 'diagram' && selectedDiagram) ||
     (faceSource === 'kit' && selectedReferenceKit);
 
@@ -293,7 +295,8 @@ export default function AISwapperPage() {
       const result = await swapApi.create({
         videoId: activeVideo.id,
         strategy,
-        uploadedFaceUrl: faceSource === 'upload' ? uploadedFaceUrl || undefined : undefined,
+        uploadedFaceUrl: faceSource === 'upload' && uploadedFaceUrls.length > 0 ? uploadedFaceUrls[0] : undefined,
+        additionalReferenceUrls: faceSource === 'upload' && uploadedFaceUrls.length > 1 ? uploadedFaceUrls.slice(1) : undefined,
         characterDiagramId: faceSource === 'diagram' ? selectedDiagram?.id : undefined,
         referenceKitId: faceSource === 'kit' ? selectedReferenceKit?.id : undefined,
         loraId: selectedLora?.id,
@@ -314,7 +317,7 @@ export default function AISwapperPage() {
       // Clear selections
       setSelectedVideo(null);
       setUploadedVideo(null);
-      setUploadedFaceUrl(null);
+      setUploadedFaceUrls([]);
       setSelectedDiagram(null);
       setSelectedReferenceKit(null);
     } catch (error) {
@@ -363,6 +366,25 @@ export default function AISwapperPage() {
     if (job.status !== 'processing' || !job.started_at) return false;
     const startedAt = new Date(job.started_at).getTime();
     return Date.now() - startedAt > 45 * 60 * 1000; // 45 minutes for advanced pipeline
+  };
+
+  // === PRESET HANDLING ===
+  const currentPresetSettings: SwapPresetSettings = {
+    strategy,
+    videoModel,
+    upscaleMethod,
+    upscaleResolution,
+    keyFrameCount,
+    keepOriginalOutfit,
+  };
+
+  const handleApplyPreset = (settings: SwapPresetSettings) => {
+    setStrategy(settings.strategy);
+    setVideoModel(settings.videoModel);
+    setUpscaleMethod(settings.upscaleMethod);
+    setUpscaleResolution(settings.upscaleResolution);
+    setKeyFrameCount(settings.keyFrameCount);
+    setKeepOriginalOutfit(settings.keepOriginalOutfit);
   };
 
   const getJobStatusBadge = (job: Job) => {
@@ -525,9 +547,9 @@ export default function AISwapperPage() {
               {/* Upload Tab */}
               <TabsContent value="upload" className="mt-3">
                 <FaceUploadDropzone
-                  onUpload={setUploadedFaceUrl}
-                  uploadedUrl={uploadedFaceUrl}
-                  onClear={() => setUploadedFaceUrl(null)}
+                  onUpload={setUploadedFaceUrls}
+                  uploadedUrls={uploadedFaceUrls}
+                  onClear={() => setUploadedFaceUrls([])}
                 />
               </TabsContent>
 
@@ -712,7 +734,13 @@ export default function AISwapperPage() {
       {/* === OPTIONS PANEL === */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-lg">Processing Options</CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-lg">Processing Options</CardTitle>
+            <PresetSelector
+              currentSettings={currentPresetSettings}
+              onApplyPreset={handleApplyPreset}
+            />
+          </div>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-6">

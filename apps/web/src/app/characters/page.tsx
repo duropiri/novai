@@ -286,14 +286,14 @@ export default function CharacterDiagramPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Create Form */}
-        <Card>
-          <CardHeader>
+        <Card className="flex flex-col max-h-[800px]">
+          <CardHeader className="flex-shrink-0">
             <CardTitle>Generate New Diagram</CardTitle>
             <CardDescription>
               Create a character reference sheet with full-body and face close-up views
             </CardDescription>
           </CardHeader>
-          <CardContent>
+          <CardContent className="flex-1 overflow-y-auto">
             <form onSubmit={handleSubmit} className="space-y-6">
               {/* Photo Upload - Multi-image */}
               <div className="space-y-2">
@@ -310,9 +310,10 @@ export default function CharacterDiagramPage() {
                   primaryIndex={primaryImageIndex}
                   onPrimaryChange={setPrimaryImageIndex}
                   disabled={isGenerating}
-                  maxImages={6}
                   minImages={1}
                   imageTypes={['front', 'profile', '3/4 angle', 'full_body', 'expression', 'reference']}
+                  enableVideo={true}
+                  enableGoogleDrive={true}
                 />
               </div>
 
@@ -400,8 +401,8 @@ export default function CharacterDiagramPage() {
         </Card>
 
         {/* Diagrams List */}
-        <Card>
-          <CardHeader>
+        <Card className="flex flex-col max-h-[800px]">
+          <CardHeader className="flex-shrink-0">
             <div className="flex items-center justify-between">
               <div>
                 <CardTitle>Your Character Diagrams</CardTitle>
@@ -419,7 +420,7 @@ export default function CharacterDiagramPage() {
               </Button>
             </div>
           </CardHeader>
-          <CardContent>
+          <CardContent className="flex-1 overflow-hidden">
             {isLoadingDiagrams ? (
               <div className="flex items-center justify-center py-8">
                 <Loader2 className="w-6 h-6 animate-spin" />
@@ -430,7 +431,7 @@ export default function CharacterDiagramPage() {
                 <p className="text-sm">Generate your first diagram to get started</p>
               </div>
             ) : (
-              <div className="space-y-3">
+              <div className="space-y-3 h-full overflow-y-auto pr-1">
                 {diagrams.map((diagram) => (
                   <div key={diagram.id} className="border rounded-lg overflow-hidden">
                     {diagram.status === 'ready' && diagram.file_url && (

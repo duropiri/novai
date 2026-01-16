@@ -539,4 +539,119 @@ export class LoraController {
       throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
+
+  // ============================================
+  // HiRA (High Rank Adaptation) Face Endpoints
+  // ============================================
+
+  /**
+   * Process training images for face detection and identity tracking
+   * This runs HiRA face processing on the training images
+   */
+  @Post(':id/faces/process')
+  async processTrainingFaces(
+    @Param('id') id: string,
+    @Body() dto: { imageUrls: string[] },
+  ): Promise<{
+    totalFaces: number;
+    clusters: Array<{
+      clusterIndex: number;
+      faceCount: number;
+      matchedIdentity?: { id: string; name?: string; similarity: number };
+      detectionIds: string[];
+    }>;
+    primaryIdentity?: unknown;
+    newIdentities: unknown[];
+    angleCoverage: Record<string, { angle: string; quality: number }[]>;
+  }> {
+    const model = await this.loraService.findOne(id);
+    if (!model) {
+      throw new HttpException('LoRA model not found', HttpStatus.NOT_FOUND);
+    }
+
+    if (!dto.imageUrls || dto.imageUrls.length === 0) {
+      throw new HttpException('At least one image URL is required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      return await this.loraService.processTrainingFaces(id, dto.imageUrls);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to process faces';
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  /**
+   * Get face detection results for a LoRA model
+   */
+  @Get(':id/faces')
+  async getFaceResults(@Param('id') id: string): Promise<{
+    primaryIdentity?: unknown;
+    allIdentities: unknown[];
+    detectedFaces: unknown;
+  }> {
+    const result = await this.loraService.getFaceResults(id);
+    if (!result) {
+      throw new HttpException('LoRA model not found', HttpStatus.NOT_FOUND);
+    }
+    return result;
+  }
+
+  /**
+   * Set the primary face identity for a LoRA model
+   */
+  @Post(':id/faces/primary')
+  async setPrimaryFaceIdentity(
+    @Param('id') id: string,
+    @Body() dto: { identityId: string },
+  ): Promise<{ success: boolean }> {
+    const model = await this.loraService.findOne(id);
+    if (!model) {
+      throw new HttpException('LoRA model not found', HttpStatus.NOT_FOUND);
+    }
+
+    if (!dto.identityId?.trim()) {
+      throw new HttpException('Identity ID is required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      await this.loraService.setPrimaryFaceIdentity(id, dto.identityId.trim());
+      return { success: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to set primary identity';
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  /**
+   * Generate 3D face mesh for the primary identity
+   */
+  @Post(':id/faces/mesh')
+  async generateFaceMesh(@Param('id') id: string): Promise<{
+    meshUrl?: string;
+    thumbnailUrl?: string;
+    skullVectors?: unknown;
+    skipped?: boolean;
+    reason?: string;
+  }> {
+    const model = await this.loraService.findOne(id);
+    if (!model) {
+      throw new HttpException('LoRA model not found', HttpStatus.NOT_FOUND);
+    }
+
+    try {
+      const result = await this.loraService.generateFaceMesh(id);
+      if (!result) {
+        return { skipped: true, reason: 'Insufficient angle coverage or mesh already exists' };
+      }
+      return {
+        meshUrl: result.meshUrl,
+        thumbnailUrl: result.thumbnailUrl,
+        skullVectors: result.skullVectors,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to generate mesh';
+      throw new HttpException(message, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
 }

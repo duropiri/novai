@@ -31,6 +31,14 @@ export interface DbLoraModel {
   applied_optimizations?: Record<string, unknown> | null;
   validation_result?: Record<string, unknown> | null;
   quality_score?: number | null;
+  // HiRA (High Rank Adaptation) face identity fields
+  primary_face_identity_id?: string | null;
+  detected_faces?: Array<{
+    detectionIds: string[];
+    identityId?: string;
+    faceCount: number;
+    isPrimary: boolean;
+  }> | null;
   // Timestamps
   created_at: string;
   updated_at: string;

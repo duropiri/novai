@@ -265,7 +265,7 @@ export default function ImagesPage() {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 p-6 overflow-auto">
+      <div className="flex-1 pl-6 overflow-auto">
         <div className="flex items-center justify-between mb-6">
           <div>
             <h1 className="text-2xl font-bold">
