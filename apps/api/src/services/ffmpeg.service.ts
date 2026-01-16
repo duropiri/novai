@@ -22,6 +22,8 @@ export interface ExtractFramesOptions {
   count?: number; // Extract exactly N frames evenly spaced
   startTime?: number; // Start extraction at this second
   endTime?: number; // End extraction at this second
+  upscale?: boolean; // Upscale video before extraction (default: false)
+  targetResolution?: number; // Target resolution for upscaling (default: 1080)
 }
 
 export interface AssembleFramesOptions {
@@ -76,6 +78,48 @@ export class FFmpegService {
   }
 
   /**
+   * Upscale video to target resolution using Real-ESRGAN or lanczos scaling
+   * Returns path to upscaled video
+   */
+  async upscaleVideo(
+    inputPath: string,
+    targetResolution: number = 1080,
+  ): Promise<string> {
+    const tempDir = path.dirname(inputPath);
+    const upscaledPath = path.join(tempDir, 'upscaled.mp4');
+
+    // Get current video resolution
+    const { stdout: probeOut } = await execAsync(
+      `ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "${inputPath}"`,
+    );
+    const [width, height] = probeOut.trim().split(',').map(Number);
+
+    // Calculate scale factor to reach target resolution (based on shorter dimension)
+    const currentShort = Math.min(width, height);
+    const scaleFactor = targetResolution / currentShort;
+
+    // Only upscale if video is smaller than target
+    if (scaleFactor <= 1.0) {
+      this.logger.log(`Video already at ${width}x${height}, no upscaling needed`);
+      return inputPath;
+    }
+
+    const newWidth = Math.round(width * scaleFactor);
+    const newHeight = Math.round(height * scaleFactor);
+
+    this.logger.log(`Upscaling video from ${width}x${height} to ${newWidth}x${newHeight}`);
+
+    // Use lanczos scaling for high quality upscaling
+    // For even better quality, could integrate Real-ESRGAN but lanczos is fast and good
+    await execAsync(
+      `ffmpeg -i "${inputPath}" -vf "scale=${newWidth}:${newHeight}:flags=lanczos,unsharp=5:5:1.0:5:5:0.0" -c:v libx264 -preset medium -crf 18 -c:a copy -y "${upscaledPath}"`,
+    );
+
+    this.logger.log('Video upscaling complete');
+    return upscaledPath;
+  }
+
+  /**
    * Extract frames from video
    * Returns array of uploaded frame URLs
    */
@@ -84,12 +128,18 @@ export class FFmpegService {
     options: ExtractFramesOptions = {},
     uploadPrefix: string,
   ): Promise<string[]> {
-    const { interval = 1, count, startTime = 0, endTime } = options;
+    const { interval = 1, count, startTime = 0, endTime, upscale = false, targetResolution = 1080 } = options;
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ffmpeg-extract-'));
 
     try {
-      const videoPath = path.join(tempDir, 'input.mp4');
+      let videoPath = path.join(tempDir, 'input.mp4');
       await this.downloadFile(videoUrl, videoPath);
+
+      // Upscale video if requested
+      if (upscale) {
+        this.logger.log('Upscaling video before frame extraction...');
+        videoPath = await this.upscaleVideo(videoPath, targetResolution);
+      }
 
       const videoInfo = await this.getVideoInfo(videoUrl);
       const { fps, duration } = videoInfo;

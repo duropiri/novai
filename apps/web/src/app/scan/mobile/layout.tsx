@@ -27,7 +27,9 @@ export default function MobileLayout({
   children: React.ReactNode;
 }) {
   return (
-    <div className="min-h-screen bg-black text-white">
+    // Fixed full-screen overlay to cover the sidebar and any parent UI
+    // Using dvh (dynamic viewport height) to account for mobile browser UI elements
+    <div className="fixed inset-x-0 top-0 z-50 bg-black text-white overflow-hidden h-[100dvh]">
       {children}
     </div>
   );

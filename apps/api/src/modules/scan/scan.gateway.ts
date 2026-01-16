@@ -175,7 +175,7 @@ export class ScanGateway
   @SubscribeMessage('phone:frame')
   handlePhoneFrame(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: ArrayBuffer | { data: ArrayBuffer },
+    @MessageBody() data: Buffer | ArrayBuffer | { data: Buffer | ArrayBuffer },
   ) {
     const subscription = this.subscriptions.get(client.id);
     if (!subscription || subscription.role !== 'phone') {
@@ -185,8 +185,17 @@ export class ScanGateway
     // Forward frame to desktop
     const desktopId = this.sessionDesktops.get(subscription.sessionId);
     if (desktopId) {
-      // Handle both direct ArrayBuffer and wrapped object
-      const frameData = data instanceof ArrayBuffer ? data : data.data;
+      // Handle both direct binary data and wrapped object
+      // Socket.io may send as Buffer (Node.js) instead of ArrayBuffer
+      let frameData: Buffer | ArrayBuffer;
+      if (Buffer.isBuffer(data) || data instanceof ArrayBuffer) {
+        frameData = data;
+      } else if (typeof data === 'object' && 'data' in data) {
+        frameData = data.data;
+      } else {
+        this.logger.warn('Received invalid frame data type');
+        return;
+      }
       this.server.to(desktopId).emit('frame:preview', frameData);
     }
   }

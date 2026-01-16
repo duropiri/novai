@@ -2,6 +2,8 @@ import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { GoogleGenAI, GenerateContentConfig } from '@google/genai';
 import { SupabaseService } from '../modules/files/supabase.service';
+import { withRetry, RetryOptions } from '../utils/retry';
+import { RateLimiter } from '../utils/rate-limiter';
 
 export interface CharacterDiagramResult {
   imageBase64: string;
@@ -21,6 +23,24 @@ export class GeminiService {
   private ai: GoogleGenAI | null = null;
   private readonly model = 'gemini-3-pro-image-preview'; // Nano Banana Pro
 
+  // Rate limiter: Conservative limits to avoid 429 errors
+  // Gemini free tier: ~60 RPM, paid: ~1000 RPM
+  // We use conservative limits to be safe
+  private readonly rateLimiter: RateLimiter;
+
+  // Default retry options for Gemini API calls
+  private readonly retryOptions: RetryOptions = {
+    maxRetries: 5,
+    initialDelayMs: 2000,
+    maxDelayMs: 120000,
+    backoffMultiplier: 2,
+    onRetry: (attempt, error, delayMs) => {
+      this.logger.warn(
+        `[Gemini] Retry ${attempt}/5 after error: ${error.message}. Waiting ${Math.round(delayMs / 1000)}s...`,
+      );
+    },
+  };
+
   constructor(
     private configService: ConfigService,
     @Inject(forwardRef(() => SupabaseService))
@@ -32,6 +52,18 @@ export class GeminiService {
     } else {
       this.ai = new GoogleGenAI({ apiKey: this.apiKey });
     }
+
+    // Initialize rate limiter with conservative limits
+    const maxRpm = this.configService.get<number>('GEMINI_MAX_REQUESTS_PER_MINUTE') || 30;
+    const maxConcurrent = this.configService.get<number>('GEMINI_MAX_CONCURRENT') || 2;
+
+    this.rateLimiter = new RateLimiter({
+      maxRequestsPerMinute: maxRpm,
+      maxConcurrent: maxConcurrent,
+      name: 'Gemini',
+    });
+
+    this.logger.log(`Gemini rate limiter configured: ${maxRpm} RPM, ${maxConcurrent} concurrent`);
   }
 
   // Base prompt shared between both clothing options
@@ -206,42 +238,50 @@ Maintain a neutral, accurate, reference-grade presentation suitable for face-swa
 
     this.logger.log('Calling Gemini API...');
 
-    const response = await this.ai.models.generateContentStream({
-      model: this.model,
-      config,
-      contents,
-    });
+    // Use rate limiter and retry for resilience
+    return this.rateLimiter.execute(() =>
+      withRetry(
+        async () => {
+          const response = await this.ai!.models.generateContentStream({
+            model: this.model,
+            config,
+            contents,
+          });
 
-    // Collect the streamed response
-    let imageBase64: string | null = null;
-    let imageMimeType: string | null = null;
+          // Collect the streamed response
+          let imageBase64: string | null = null;
+          let imageMimeType: string | null = null;
 
-    for await (const chunk of response) {
-      if (!chunk.candidates || !chunk.candidates[0]?.content?.parts) {
-        continue;
-      }
+          for await (const chunk of response) {
+            if (!chunk.candidates || !chunk.candidates[0]?.content?.parts) {
+              continue;
+            }
 
-      const part = chunk.candidates[0].content.parts[0];
-      if (part && 'inlineData' in part && part.inlineData) {
-        imageBase64 = part.inlineData.data || null;
-        imageMimeType = part.inlineData.mimeType || null;
-        this.logger.log('Image received from Gemini');
-        break;
-      } else if (part && 'text' in part) {
-        this.logger.debug(`Gemini text response: ${part.text}`);
-      }
-    }
+            const part = chunk.candidates[0].content.parts[0];
+            if (part && 'inlineData' in part && part.inlineData) {
+              imageBase64 = part.inlineData.data || null;
+              imageMimeType = part.inlineData.mimeType || null;
+              this.logger.log('Image received from Gemini');
+              break;
+            } else if (part && 'text' in part) {
+              this.logger.debug(`Gemini text response: ${part.text}`);
+            }
+          }
 
-    if (!imageBase64 || !imageMimeType) {
-      throw new Error('No image generated in Gemini response');
-    }
+          if (!imageBase64 || !imageMimeType) {
+            throw new Error('No image generated in Gemini response');
+          }
 
-    this.logger.log('Character diagram generated successfully');
+          this.logger.log('Character diagram generated successfully');
 
-    return {
-      imageBase64,
-      mimeType: imageMimeType,
-    };
+          return {
+            imageBase64,
+            mimeType: imageMimeType,
+          };
+        },
+        this.retryOptions,
+      ),
+    );
   }
 
   /**
@@ -286,42 +326,50 @@ Maintain a neutral, accurate, reference-grade presentation suitable for face-swa
 
     this.logger.log('Calling Gemini API for reference image...');
 
-    const response = await this.ai.models.generateContentStream({
-      model: this.model,
-      config,
-      contents,
-    });
+    // Use rate limiter and retry for resilience
+    return this.rateLimiter.execute(() =>
+      withRetry(
+        async () => {
+          const response = await this.ai!.models.generateContentStream({
+            model: this.model,
+            config,
+            contents,
+          });
 
-    // Collect the streamed response
-    let imageBase64: string | null = null;
-    let imageMimeType: string | null = null;
+          // Collect the streamed response
+          let imageBase64: string | null = null;
+          let imageMimeType: string | null = null;
 
-    for await (const chunk of response) {
-      if (!chunk.candidates || !chunk.candidates[0]?.content?.parts) {
-        continue;
-      }
+          for await (const chunk of response) {
+            if (!chunk.candidates || !chunk.candidates[0]?.content?.parts) {
+              continue;
+            }
 
-      const part = chunk.candidates[0].content.parts[0];
-      if (part && 'inlineData' in part && part.inlineData) {
-        imageBase64 = part.inlineData.data || null;
-        imageMimeType = part.inlineData.mimeType || null;
-        this.logger.log('Reference image received from Gemini');
-        break;
-      } else if (part && 'text' in part) {
-        this.logger.debug(`Gemini text response: ${part.text}`);
-      }
-    }
+            const part = chunk.candidates[0].content.parts[0];
+            if (part && 'inlineData' in part && part.inlineData) {
+              imageBase64 = part.inlineData.data || null;
+              imageMimeType = part.inlineData.mimeType || null;
+              this.logger.log('Reference image received from Gemini');
+              break;
+            } else if (part && 'text' in part) {
+              this.logger.debug(`Gemini text response: ${part.text}`);
+            }
+          }
 
-    if (!imageBase64 || !imageMimeType) {
-      throw new Error('No image generated in Gemini response');
-    }
+          if (!imageBase64 || !imageMimeType) {
+            throw new Error('No image generated in Gemini response');
+          }
 
-    this.logger.log('Reference image generated successfully');
+          this.logger.log('Reference image generated successfully');
 
-    return {
-      imageBase64,
-      mimeType: imageMimeType,
-    };
+          return {
+            imageBase64,
+            mimeType: imageMimeType,
+          };
+        },
+        this.retryOptions,
+      ),
+    );
   }
 
   /**
@@ -436,65 +484,76 @@ Output: 2K resolution, photorealistic, highest quality.`;
 
     this.logger.log('Calling Nano Banana Pro (Gemini) for frame regeneration - NO FALLBACKS...');
 
-    const response = await this.ai.models.generateContentStream({
-      model: this.model,
-      config,
-      contents,
-    });
+    // Use rate limiter and retry for resilience
+    return this.rateLimiter.execute(() =>
+      withRetry(
+        async () => {
+          const response = await this.ai!.models.generateContentStream({
+            model: this.model,
+            config,
+            contents,
+          });
 
-    // Collect the streamed response
-    let imageBase64: string | null = null;
-    let imageMimeType: string | null = null;
-    const textResponses: string[] = [];
-    let blockedBySafety = false;
-    let finishReason: string | null = null;
+          // Collect the streamed response
+          let imageBase64: string | null = null;
+          let imageMimeType: string | null = null;
+          const textResponses: string[] = [];
+          let blockedBySafety = false;
+          let finishReason: string | null = null;
 
-    for await (const chunk of response) {
-      // Check for safety blocking
-      const candidate = chunk.candidates?.[0];
-      if (candidate?.finishReason) {
-        finishReason = candidate.finishReason;
-        if (finishReason === 'SAFETY' || finishReason === 'IMAGE_SAFETY') {
-          blockedBySafety = true;
-          this.logger.warn(`Nano Banana Pro: Content blocked by safety filter (${finishReason})`);
-        }
-      }
+          for await (const chunk of response) {
+            // Check for safety blocking
+            const candidate = chunk.candidates?.[0];
+            if (candidate?.finishReason) {
+              finishReason = candidate.finishReason;
+              if (finishReason === 'SAFETY' || finishReason === 'IMAGE_SAFETY') {
+                blockedBySafety = true;
+                this.logger.warn(`Nano Banana Pro: Content blocked by safety filter (${finishReason})`);
+              }
+            }
 
-      if (!candidate?.content?.parts) {
-        this.logger.debug(`Gemini chunk without parts: ${JSON.stringify(chunk)}`);
-        continue;
-      }
+            if (!candidate?.content?.parts) {
+              this.logger.debug(`Gemini chunk without parts: ${JSON.stringify(chunk)}`);
+              continue;
+            }
 
-      // Check all parts, not just the first one
-      for (const part of candidate.content.parts) {
-        if (part && 'inlineData' in part && part.inlineData) {
-          imageBase64 = part.inlineData.data || null;
-          imageMimeType = part.inlineData.mimeType || null;
-          this.logger.log('Regenerated frame received from Gemini');
-        } else if (part && 'text' in part && part.text) {
-          textResponses.push(part.text);
-          this.logger.log(`Gemini text response: ${part.text}`);
-        }
-      }
-    }
+            // Check all parts, not just the first one
+            for (const part of candidate.content.parts) {
+              if (part && 'inlineData' in part && part.inlineData) {
+                imageBase64 = part.inlineData.data || null;
+                imageMimeType = part.inlineData.mimeType || null;
+                this.logger.log('Regenerated frame received from Gemini');
+              } else if (part && 'text' in part && part.text) {
+                textResponses.push(part.text);
+                this.logger.log(`Gemini text response: ${part.text}`);
+              }
+            }
+          }
 
-    // Check for safety block - DO NOT FALLBACK, throw error
-    if (blockedBySafety) {
-      throw new Error(`Nano Banana Pro: Image blocked by safety filter (${finishReason})`);
-    }
+          // Check for safety block - DO NOT FALLBACK, throw error (not retryable)
+          if (blockedBySafety) {
+            const safetyError = new Error(`Nano Banana Pro: Image blocked by safety filter (${finishReason})`);
+            // Mark as non-retryable by using a specific error message
+            (safetyError as Error & { nonRetryable: boolean }).nonRetryable = true;
+            throw safetyError;
+          }
 
-    if (!imageBase64 || !imageMimeType) {
-      const textSummary = textResponses.join(' ').slice(0, 500);
-      this.logger.error(`Nano Banana Pro did not return an image. Text response: ${textSummary}`);
-      throw new Error(`Nano Banana Pro: No image generated. Response: ${textSummary || 'No response'}`);
-    }
+          if (!imageBase64 || !imageMimeType) {
+            const textSummary = textResponses.join(' ').slice(0, 500);
+            this.logger.error(`Nano Banana Pro did not return an image. Text response: ${textSummary}`);
+            throw new Error(`Nano Banana Pro: No image generated. Response: ${textSummary || 'No response'}`);
+          }
 
-    this.logger.log('Frame regeneration completed successfully');
+          this.logger.log('Frame regeneration completed successfully');
 
-    return {
-      imageBase64,
-      mimeType: imageMimeType,
-    };
+          return {
+            imageBase64,
+            mimeType: imageMimeType,
+          };
+        },
+        this.retryOptions,
+      ),
+    );
   }
 
   /**
@@ -573,59 +632,67 @@ Output: 2K resolution, photorealistic, highest quality.`;
 
     this.logger.log(`Calling Gemini with ${sortedImages.length} references...`);
 
-    const response = await this.ai.models.generateContentStream({
-      model: this.model,
-      config,
-      contents,
-    });
+    // Use rate limiter and retry for resilience
+    return this.rateLimiter.execute(() =>
+      withRetry(
+        async () => {
+          const response = await this.ai!.models.generateContentStream({
+            model: this.model,
+            config,
+            contents,
+          });
 
-    // Collect the streamed response
-    let imageBase64: string | null = null;
-    let imageMimeType: string | null = null;
-    const textResponses: string[] = [];
-    let blockedBySafety = false;
-    let finishReason: string | null = null;
+          // Collect the streamed response
+          let imageBase64: string | null = null;
+          let imageMimeType: string | null = null;
+          const textResponses: string[] = [];
+          let blockedBySafety = false;
+          let finishReason: string | null = null;
 
-    for await (const chunk of response) {
-      const candidate = chunk.candidates?.[0];
-      if (candidate?.finishReason) {
-        finishReason = candidate.finishReason;
-        if (finishReason === 'SAFETY' || finishReason === 'IMAGE_SAFETY') {
-          blockedBySafety = true;
-          this.logger.warn(`Multi-reference generation blocked by safety: ${finishReason}`);
-        }
-      }
+          for await (const chunk of response) {
+            const candidate = chunk.candidates?.[0];
+            if (candidate?.finishReason) {
+              finishReason = candidate.finishReason;
+              if (finishReason === 'SAFETY' || finishReason === 'IMAGE_SAFETY') {
+                blockedBySafety = true;
+                this.logger.warn(`Multi-reference generation blocked by safety: ${finishReason}`);
+              }
+            }
 
-      if (!candidate?.content?.parts) {
-        continue;
-      }
+            if (!candidate?.content?.parts) {
+              continue;
+            }
 
-      for (const part of candidate.content.parts) {
-        if (part && 'inlineData' in part && part.inlineData) {
-          imageBase64 = part.inlineData.data || null;
-          imageMimeType = part.inlineData.mimeType || null;
-          this.logger.log('Multi-reference image received from Gemini');
-        } else if (part && 'text' in part && part.text) {
-          textResponses.push(part.text);
-        }
-      }
-    }
+            for (const part of candidate.content.parts) {
+              if (part && 'inlineData' in part && part.inlineData) {
+                imageBase64 = part.inlineData.data || null;
+                imageMimeType = part.inlineData.mimeType || null;
+                this.logger.log('Multi-reference image received from Gemini');
+              } else if (part && 'text' in part && part.text) {
+                textResponses.push(part.text);
+              }
+            }
+          }
 
-    if (blockedBySafety) {
-      throw new Error(`Generation blocked by safety filter (${finishReason})`);
-    }
+          if (blockedBySafety) {
+            throw new Error(`Generation blocked by safety filter (${finishReason})`);
+          }
 
-    if (!imageBase64 || !imageMimeType) {
-      const textSummary = textResponses.join(' ').slice(0, 500);
-      throw new Error(`No image generated. Response: ${textSummary || 'No response'}`);
-    }
+          if (!imageBase64 || !imageMimeType) {
+            const textSummary = textResponses.join(' ').slice(0, 500);
+            throw new Error(`No image generated. Response: ${textSummary || 'No response'}`);
+          }
 
-    this.logger.log('Multi-reference generation completed successfully');
+          this.logger.log('Multi-reference generation completed successfully');
 
-    return {
-      imageBase64,
-      mimeType: imageMimeType,
-    };
+          return {
+            imageBase64,
+            mimeType: imageMimeType,
+          };
+        },
+        this.retryOptions,
+      ),
+    );
   }
 
   /**
@@ -645,25 +712,33 @@ Output: 2K resolution, photorealistic, highest quality.`;
 
     const imageData = await this.downloadImageAsBase64(imageUrl);
 
-    const response = await this.ai.models.generateContent({
-      model: 'gemini-2.0-flash', // Use flash for analysis (faster, cheaper)
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            { text: analysisPrompt },
-            {
-              inlineData: {
-                mimeType: imageData.mimeType,
-                data: imageData.base64,
+    // Use rate limiter and retry for resilience
+    return this.rateLimiter.execute(() =>
+      withRetry(
+        async () => {
+          const response = await this.ai!.models.generateContent({
+            model: 'gemini-2.0-flash', // Use flash for analysis (faster, cheaper)
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  { text: analysisPrompt },
+                  {
+                    inlineData: {
+                      mimeType: imageData.mimeType,
+                      data: imageData.base64,
+                    },
+                  },
+                ],
               },
-            },
-          ],
-        },
-      ],
-    });
+            ],
+          });
 
-    return response.text || '';
+          return response.text || '';
+        },
+        this.retryOptions,
+      ),
+    );
   }
 
   // ============================================

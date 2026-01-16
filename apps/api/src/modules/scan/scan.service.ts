@@ -1,6 +1,9 @@
 import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import { randomBytes } from 'crypto';
 import { SupabaseService } from '../files/supabase.service';
+import { FFmpegService } from '../../services/ffmpeg.service';
 
 export interface ScanSession {
   id: string;
@@ -54,6 +57,26 @@ export interface CreateCaptureDto {
   isAutoCaptured?: boolean;
 }
 
+export interface ExportToLoraDto {
+  name: string;
+  triggerWord: string;
+  steps?: number;
+  learningRate?: number;
+  isStyle?: boolean;
+}
+
+export interface ExportToCharacterDto {
+  name: string;
+}
+
+export interface ExportToReferenceKitDto {
+  name: string;
+}
+
+export interface ExportToEmotionBoardDto {
+  name: string;
+}
+
 const DEFAULT_ANGLES = [
   'front',
   'profile_left',
@@ -69,7 +92,15 @@ const DEFAULT_ANGLES = [
 export class ScanService {
   private readonly logger = new Logger(ScanService.name);
 
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly ffmpeg: FFmpegService,
+    @InjectQueue('scan-video') private readonly scanVideoQueue: Queue,
+    @InjectQueue('lora-training') private readonly loraQueue: Queue,
+    @InjectQueue('character-diagram') private readonly characterQueue: Queue,
+    @InjectQueue('reference-kit') private readonly referenceKitQueue: Queue,
+    @InjectQueue('expression-board') private readonly expressionBoardQueue: Queue,
+  ) {}
 
   /**
    * Generate a random session code (8 alphanumeric characters)
@@ -419,5 +450,285 @@ export class ScanService {
     }
 
     return data?.length || 0;
+  }
+
+  /**
+   * Process video upload from phone
+   * Uploads video and queues background job for frame extraction
+   */
+  async processVideoUpload(
+    sessionId: string,
+    videoBase64: string,
+    verificationNumbers: string[],
+  ): Promise<{ success: boolean; jobId: string }> {
+    const session = await this.getSession(sessionId);
+
+    if (session.status === 'completed' || session.status === 'expired') {
+      throw new BadRequestException('Session is no longer active');
+    }
+
+    this.logger.log(`Processing video upload for session ${sessionId}`);
+    this.logger.log(`Verification numbers: ${verificationNumbers.join(', ')}`);
+
+    // Upload video to storage
+    const videoBuffer = Buffer.from(videoBase64, 'base64');
+    const timestamp = Date.now();
+    const videoPath = `scan-videos/${sessionId}/recording_${timestamp}.webm`;
+
+    const { url: videoUrl } = await this.supabase.uploadFile(
+      'character-images',
+      videoPath,
+      videoBuffer,
+      'video/webm',
+    );
+
+    this.logger.log(`Video uploaded to ${videoUrl}`);
+
+    // Update session status to processing
+    await this.supabase.getClient()
+      .from('phone_scan_sessions')
+      .update({
+        status: 'scanning',
+        captured_angles: {
+          ...session.captured_angles,
+          _video: { url: videoUrl, verificationNumbers },
+        },
+      })
+      .eq('id', sessionId);
+
+    // Queue background job to extract frames and analyze
+    const job = await this.scanVideoQueue.add('process-scan-video', {
+      sessionId,
+      videoUrl,
+      verificationNumbers,
+    });
+
+    this.logger.log(`Queued scan video processing job ${job.id} for session ${sessionId}`);
+
+    return {
+      success: true,
+      jobId: job.id as string,
+    };
+  }
+
+  /**
+   * Export scan captures to LoRA training
+   * Creates a ZIP of selected images and starts LoRA training
+   */
+  async exportToLora(
+    sessionId: string,
+    name: string,
+    triggerWord: string,
+    options: {
+      steps?: number;
+      learningRate?: number;
+      isStyle?: boolean;
+    } = {},
+  ): Promise<{ loraId: string; jobId: string }> {
+    const captures = await this.getSelectedCaptures(sessionId);
+
+    if (captures.length < 5) {
+      throw new BadRequestException('At least 5 captures are required for LoRA training');
+    }
+
+    const imageUrls = captures.map(c => c.image_url);
+
+    // Create ZIP of training images
+    const zipUrl = await this.ffmpeg.createTrainingZip(
+      imageUrls,
+      `lora-training/${sessionId}`,
+    );
+
+    this.logger.log(`Created training ZIP: ${zipUrl}`);
+
+    // Create LoRA record in database
+    const { data: lora, error } = await this.supabase.getClient()
+      .from('lora_models')
+      .insert({
+        name,
+        trigger_word: triggerWord,
+        training_images_url: zipUrl,
+        training_steps: options.steps || 1000,
+        learning_rate: options.learningRate || 0.0007,
+        is_style: options.isStyle || false,
+        trainer: 'wan-22',
+        status: 'pending',
+      })
+      .select()
+      .single();
+
+    if (error) {
+      throw new BadRequestException('Failed to create LoRA record');
+    }
+
+    // Queue LoRA training job
+    const job = await this.loraQueue.add('train-lora', {
+      loraId: lora.id,
+      imagesZipUrl: zipUrl,
+      steps: options.steps || 1000,
+      learningRate: options.learningRate || 0.0007,
+      isStyle: options.isStyle || false,
+    });
+
+    this.logger.log(`Queued LoRA training job ${job.id} for scan session ${sessionId}`);
+
+    return {
+      loraId: lora.id,
+      jobId: job.id as string,
+    };
+  }
+
+  /**
+   * Export scan capture to Character Diagram
+   * Uses the best front-facing image
+   */
+  async exportToCharacter(
+    sessionId: string,
+    name: string,
+  ): Promise<{ characterId: string; jobId: string }> {
+    const captures = await this.getSelectedCaptures(sessionId);
+
+    // Find best front-facing capture
+    const frontCapture = captures.find(c => c.detected_angle === 'front') ||
+                         captures.find(c => c.detected_angle?.includes('quarter')) ||
+                         captures[0];
+
+    if (!frontCapture) {
+      throw new BadRequestException('No captures available for character diagram');
+    }
+
+    // Create character record
+    const { data: character, error } = await this.supabase.getClient()
+      .from('character_diagrams')
+      .insert({
+        name,
+        source_image_url: frontCapture.image_url,
+        status: 'pending',
+      })
+      .select()
+      .single();
+
+    if (error) {
+      throw new BadRequestException('Failed to create character diagram record');
+    }
+
+    // Queue character diagram job
+    const job = await this.characterQueue.add('generate-diagram', {
+      characterId: character.id,
+      sourceImageUrl: frontCapture.image_url,
+    });
+
+    this.logger.log(`Queued character diagram job ${job.id} for scan session ${sessionId}`);
+
+    return {
+      characterId: character.id,
+      jobId: job.id as string,
+    };
+  }
+
+  /**
+   * Export scan captures to Reference Kit
+   */
+  async exportToReferenceKit(
+    sessionId: string,
+    name: string,
+  ): Promise<{ kitId: string; jobId: string }> {
+    const captures = await this.getSelectedCaptures(sessionId);
+
+    if (captures.length < 3) {
+      throw new BadRequestException('At least 3 captures are required for a reference kit');
+    }
+
+    // Find best captures for different angles
+    const findBest = (angles: string[]) =>
+      captures.find(c => angles.includes(c.detected_angle || ''));
+
+    const primaryCapture = findBest(['front', 'quarter_left', 'quarter_right']) || captures[0];
+
+    // Create reference kit record
+    const { data: kit, error } = await this.supabase.getClient()
+      .from('reference_kits')
+      .insert({
+        name,
+        primary_image_url: primaryCapture.image_url,
+        status: 'pending',
+      })
+      .select()
+      .single();
+
+    if (error) {
+      throw new BadRequestException('Failed to create reference kit record');
+    }
+
+    // Add reference images
+    const referenceImages = captures.map(c => ({
+      kit_id: kit.id,
+      image_url: c.image_url,
+      angle: c.detected_angle || 'unknown',
+      is_primary: c.id === primaryCapture.id,
+    }));
+
+    await this.supabase.getClient()
+      .from('reference_kit_images')
+      .insert(referenceImages);
+
+    // Queue reference kit processing job
+    const job = await this.referenceKitQueue.add('process-kit', {
+      kitId: kit.id,
+    });
+
+    this.logger.log(`Queued reference kit job ${job.id} for scan session ${sessionId}`);
+
+    return {
+      kitId: kit.id,
+      jobId: job.id as string,
+    };
+  }
+
+  /**
+   * Export scan captures to Emotion Board
+   */
+  async exportToEmotionBoard(
+    sessionId: string,
+    name: string,
+  ): Promise<{ boardId: string; jobId: string }> {
+    const captures = await this.getSelectedCaptures(sessionId);
+
+    if (captures.length < 1) {
+      throw new BadRequestException('At least 1 capture is required for an emotion board');
+    }
+
+    // Find best front-facing capture as source
+    const sourceCapture = captures.find(c => c.detected_angle === 'front') ||
+                          captures.find(c => c.detected_angle?.includes('quarter')) ||
+                          captures[0];
+
+    // Create emotion board record
+    const { data: board, error } = await this.supabase.getClient()
+      .from('expression_boards')
+      .insert({
+        name,
+        source_image_url: sourceCapture.image_url,
+        status: 'pending',
+      })
+      .select()
+      .single();
+
+    if (error) {
+      throw new BadRequestException('Failed to create emotion board record');
+    }
+
+    // Queue emotion board processing job
+    const job = await this.expressionBoardQueue.add('generate-board', {
+      boardId: board.id,
+      sourceImageUrl: sourceCapture.image_url,
+    });
+
+    this.logger.log(`Queued emotion board job ${job.id} for scan session ${sessionId}`);
+
+    return {
+      boardId: board.id,
+      jobId: job.id as string,
+    };
   }
 }

@@ -714,79 +714,114 @@ export class FaceSwapProcessor extends WorkerHost implements OnModuleInit {
       await this.updateProgress(jobId, 91, 'Extracting audio from original video...');
       this.logger.log(`[${jobId}] Stage 4.5: Merging original audio`);
 
+      // Use the already-downloaded video from Stage 1 (inputVideoPath) to check for audio
+      // This is more reliable than re-downloading
       try {
-        // Download original video to extract audio
-        const originalVideoBuffer = await this.downloadBuffer(videoUrl);
-        const originalVideoPath = path.join(tempDir, 'original_video.mp4');
-        const extractedAudioPath = path.join(tempDir, 'extracted_audio.aac');
-        const generatedVideoPath = path.join(tempDir, 'generated_video.mp4');
-        const mergedVideoPath = path.join(tempDir, 'merged_with_audio.mp4');
-
-        await fs.writeFile(originalVideoPath, originalVideoBuffer);
-
-        // Check if original video has audio
+        // Check if original video has audio using the file we already have
         const { stdout: audioCheck } = await execAsync(
-          `ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of csv=p=0 "${originalVideoPath}"`,
-        ).catch(() => ({ stdout: '' }));
+          `ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of csv=p=0 "${inputVideoPath}"`,
+        ).catch((err) => {
+          this.logger.warn(`[${jobId}] ffprobe audio check failed: ${err.message}`);
+          return { stdout: '' };
+        });
 
         const hasAudio = audioCheck.trim() === 'audio';
         this.logger.log(`[${jobId}] Original video has audio: ${hasAudio}`);
+        await this.addLog(jobId, `Original video audio detected: ${hasAudio}`);
 
         if (hasAudio) {
-          await this.updateProgress(jobId, 92, 'Merging audio with generated video...');
+          await this.updateProgress(jobId, 92, 'Extracting audio track...');
 
           // Extract audio from original video
-          await execAsync(
-            `ffmpeg -i "${originalVideoPath}" -vn -acodec aac -b:a 128k -y "${extractedAudioPath}"`,
-          );
-          this.logger.log(`[${jobId}] Audio extracted successfully`);
+          const extractedAudioPath = path.join(tempDir, 'extracted_audio.aac');
+          try {
+            await execAsync(
+              `ffmpeg -i "${inputVideoPath}" -vn -acodec aac -b:a 128k -y "${extractedAudioPath}"`,
+            );
+            this.logger.log(`[${jobId}] Audio extracted to: ${extractedAudioPath}`);
+          } catch (extractError) {
+            const extractMsg = extractError instanceof Error ? extractError.message : String(extractError);
+            this.logger.error(`[${jobId}] Audio extraction failed: ${extractMsg}`);
+            await this.addLog(jobId, `Audio extraction failed: ${extractMsg}`);
+            throw extractError;
+          }
 
-          // Download generated video
-          const generatedVideoBuffer = await this.downloadBuffer(finalVideoUrl);
-          await fs.writeFile(generatedVideoPath, generatedVideoBuffer);
+          // Verify the extracted audio file exists and has content
+          const audioStats = await fs.stat(extractedAudioPath).catch(() => null);
+          if (!audioStats || audioStats.size === 0) {
+            this.logger.warn(`[${jobId}] Extracted audio file is empty or missing`);
+            await this.addLog(jobId, 'Extracted audio file is empty');
+          } else {
+            this.logger.log(`[${jobId}] Extracted audio size: ${audioStats.size} bytes`);
 
-          // Get durations to handle length mismatch
-          const { stdout: genDuration } = await execAsync(
-            `ffprobe -v error -show_entries format=duration -of csv=p=0 "${generatedVideoPath}"`,
-          );
-          const { stdout: audioDuration } = await execAsync(
-            `ffprobe -v error -show_entries format=duration -of csv=p=0 "${extractedAudioPath}"`,
-          );
+            await this.updateProgress(jobId, 93, 'Merging audio with generated video...');
 
-          const genDur = parseFloat(genDuration.trim()) || 5;
-          const audDur = parseFloat(audioDuration.trim()) || 5;
-          this.logger.log(`[${jobId}] Generated video duration: ${genDur}s, Audio duration: ${audDur}s`);
+            // Download generated video
+            const generatedVideoPath = path.join(tempDir, 'generated_video.mp4');
+            const generatedVideoBuffer = await this.downloadBuffer(finalVideoUrl);
+            await fs.writeFile(generatedVideoPath, generatedVideoBuffer);
+            this.logger.log(`[${jobId}] Downloaded generated video: ${generatedVideoBuffer.length} bytes`);
 
-          // Merge audio with generated video
-          // Use -shortest to cut audio if longer than video
-          // Use -t to limit to generated video duration
-          await execAsync(
-            `ffmpeg -i "${generatedVideoPath}" -i "${extractedAudioPath}" -c:v copy -c:a aac -b:a 128k -map 0:v:0 -map 1:a:0 -shortest -t ${genDur} -y "${mergedVideoPath}"`,
-          );
+            // Get durations for logging
+            const { stdout: genDuration } = await execAsync(
+              `ffprobe -v error -show_entries format=duration -of csv=p=0 "${generatedVideoPath}"`,
+            ).catch(() => ({ stdout: '5' }));
+            const { stdout: audioDuration } = await execAsync(
+              `ffprobe -v error -show_entries format=duration -of csv=p=0 "${extractedAudioPath}"`,
+            ).catch(() => ({ stdout: '5' }));
 
-          // Update finalVideoUrl to point to local merged file
-          const mergedBuffer = await fs.readFile(mergedVideoPath);
+            const genDur = parseFloat(genDuration.trim()) || 5;
+            const audDur = parseFloat(audioDuration.trim()) || 5;
+            this.logger.log(`[${jobId}] Generated video: ${genDur.toFixed(2)}s, Audio: ${audDur.toFixed(2)}s`);
+            await this.addLog(jobId, `Video duration: ${genDur.toFixed(1)}s, Audio: ${audDur.toFixed(1)}s`);
 
-          // Upload merged video temporarily to get URL
-          const mergedPath = `${videoId}/merged_${Date.now()}.mp4`;
-          const { url: mergedUrl } = await this.supabase.uploadFile(
-            'processed-videos',
-            mergedPath,
-            mergedBuffer,
-            'video/mp4',
-          );
+            // Merge audio with generated video
+            const mergedVideoPath = path.join(tempDir, 'merged_with_audio.mp4');
+            try {
+              // Use -shortest to handle duration mismatch, -map to explicitly select streams
+              await execAsync(
+                `ffmpeg -i "${generatedVideoPath}" -i "${extractedAudioPath}" -c:v copy -c:a aac -b:a 128k -map 0:v:0 -map 1:a:0 -shortest -y "${mergedVideoPath}"`,
+              );
+              this.logger.log(`[${jobId}] Audio merge command completed`);
+            } catch (mergeError) {
+              const mergeMsg = mergeError instanceof Error ? mergeError.message : String(mergeError);
+              this.logger.error(`[${jobId}] FFmpeg merge failed: ${mergeMsg}`);
+              await this.addLog(jobId, `Audio merge failed: ${mergeMsg}`);
+              throw mergeError;
+            }
 
-          finalVideoUrl = mergedUrl;
-          this.logger.log(`[${jobId}] Audio merged successfully: ${finalVideoUrl}`);
-          await this.addLog(jobId, 'Original audio merged with generated video');
+            // Verify merged video has audio
+            const { stdout: mergedAudioCheck } = await execAsync(
+              `ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of csv=p=0 "${mergedVideoPath}"`,
+            ).catch(() => ({ stdout: '' }));
+
+            if (mergedAudioCheck.trim() === 'audio') {
+              // Read merged video and upload
+              const mergedBuffer = await fs.readFile(mergedVideoPath);
+              const mergedPath = `${videoId}/merged_${Date.now()}.mp4`;
+              const { url: mergedUrl } = await this.supabase.uploadFile(
+                'processed-videos',
+                mergedPath,
+                mergedBuffer,
+                'video/mp4',
+              );
+
+              finalVideoUrl = mergedUrl;
+              this.logger.log(`[${jobId}] Audio merged successfully: ${finalVideoUrl}`);
+              await this.addLog(jobId, 'Original audio merged with generated video');
+            } else {
+              this.logger.warn(`[${jobId}] Merged video does not have audio track`);
+              await this.addLog(jobId, 'Warning: Merged video missing audio track');
+            }
+          }
         } else {
           this.logger.log(`[${jobId}] No audio in original video, skipping audio merge`);
           await this.addLog(jobId, 'No audio in original video');
         }
       } catch (audioError) {
         const audioErrorMsg = audioError instanceof Error ? audioError.message : String(audioError);
-        this.logger.warn(`[${jobId}] Audio merge failed (continuing without audio): ${audioErrorMsg}`);
-        await this.addLog(jobId, `Audio merge skipped: ${audioErrorMsg}`);
+        this.logger.error(`[${jobId}] Audio processing failed: ${audioErrorMsg}`);
+        await this.addLog(jobId, `Audio processing error: ${audioErrorMsg}`);
         // Continue without audio - don't fail the job
       }
 

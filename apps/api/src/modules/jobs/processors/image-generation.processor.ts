@@ -23,13 +23,16 @@ interface ImageGenerationJobData {
   referenceKitId?: string;
   anchorFaceUrl?: string;
   referenceUrls?: string[];
+  // Expression Board mode fields
+  expressionBoardId?: string;
+  expressionLabels?: string[];
   // Common fields
   prompt?: string;
   sourceImageUrl?: string;
   aspectRatio?: '1:1' | '16:9' | '9:16' | '4:5' | '3:4';
   numImages: number;
   imageStrength?: number;
-  mode: 'text-to-image' | 'face-swap' | 'character-diagram-swap' | 'reference-kit-swap';
+  mode: 'text-to-image' | 'face-swap' | 'character-diagram-swap' | 'reference-kit-swap' | 'expression-board-swap';
 }
 
 @Processor(QUEUES.IMAGE_GENERATION)
@@ -82,6 +85,8 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
       referenceKitId,
       anchorFaceUrl,
       referenceUrls,
+      expressionBoardId,
+      expressionLabels,
       prompt,
       sourceImageUrl,
       aspectRatio,
@@ -97,6 +102,7 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
         loraId,
         characterDiagramId,
         referenceKitId,
+        expressionBoardId,
         mode,
         prompt: prompt?.substring(0, 50),
         sourceImageUrl: sourceImageUrl ? 'provided' : 'none',
@@ -246,11 +252,117 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
         }
 
         result = { images: generatedImages };
+      } else if (mode === 'expression-board-swap' && anchorFaceUrl && sourceImageUrl) {
+        // Expression Board face swap mode: swap anchor face into source image
+        this.logger.log(`Expression Board face swap mode: using fal-ai/face-swap with anchor face`);
+        this.logger.log(`Base image (scene): ${sourceImageUrl}`);
+        this.logger.log(`Swap image (anchor face): ${anchorFaceUrl}`);
+        this.logger.log(`Available expressions: ${expressionLabels?.join(', ') || 'unknown'}`);
+
+        await this.supabase.updateJob(jobId, { progress: 20 });
+
+        const generatedImages: Array<{ url: string; width: number; height: number }> = [];
+
+        for (let i = 0; i < numImages; i++) {
+          this.logger.log(`Face swap ${i + 1}/${numImages} using Expression Board anchor face`);
+
+          const swapResult = await this.falService.runFaceSwap({
+            base_image_url: sourceImageUrl,
+            swap_image_url: anchorFaceUrl,
+          });
+
+          if (swapResult.image) {
+            generatedImages.push({
+              url: swapResult.image.url,
+              width: swapResult.image.width,
+              height: swapResult.image.height,
+            });
+          }
+
+          await this.supabase.updateJob(jobId, {
+            progress: 20 + Math.floor((i + 1) / numImages * 70),
+            external_status: 'SWAPPING_FACE',
+          });
+        }
+
+        result = { images: generatedImages };
+      } else if (mode === 'expression-board-swap' && anchorFaceUrl && prompt && !sourceImageUrl) {
+        // Expression Board text-to-image mode: generate with Nano Banana, then face swap with anchor face
+        this.logger.log(`Expression Board text-to-image mode: Nano Banana + face swap with anchor face`);
+        this.logger.log(`Prompt: ${prompt.substring(0, 50)}...`);
+        this.logger.log(`Anchor face: ${anchorFaceUrl}`);
+        this.logger.log(`Available expressions: ${expressionLabels?.join(', ') || 'unknown'}`);
+
+        // Map aspect ratio for Nano Banana
+        const aspectRatioMap: Record<string, '21:9' | '16:9' | '3:2' | '4:3' | '5:4' | '1:1' | '4:5' | '3:4' | '2:3' | '9:16'> = {
+          '1:1': '1:1',
+          '16:9': '16:9',
+          '9:16': '9:16',
+          '4:5': '4:5',
+          '3:4': '3:4',
+        };
+
+        await this.supabase.updateJob(jobId, { progress: 10, external_status: 'GENERATING_BASE' });
+
+        // Step 1: Generate base images with Nano Banana
+        const baseResult = await this.geminiService.runNanoBananaGeneration({
+          prompt: prompt,
+          num_images: numImages,
+          aspect_ratio: aspectRatioMap[aspectRatio || '9:16'] || '9:16',
+          onProgress: async (status) => {
+            if (status.status === 'IN_PROGRESS') {
+              await this.supabase.updateJob(jobId, { progress: 30, external_status: 'GENERATING_BASE' });
+            }
+          },
+        });
+
+        if (!baseResult.images || baseResult.images.length === 0) {
+          throw new Error('Nano Banana (Gemini) returned no images');
+        }
+
+        this.logger.log(`Generated ${baseResult.images.length} base images with Nano Banana (Gemini)`);
+        await this.supabase.updateJob(jobId, { progress: 50, external_status: 'SWAPPING_FACES' });
+
+        // Step 2: Face swap anchor face onto each base image
+        const generatedImages: Array<{ url: string; width: number; height: number }> = [];
+
+        for (let i = 0; i < baseResult.images.length; i++) {
+          const baseImage = baseResult.images[i];
+          this.logger.log(`Face swap ${i + 1}/${baseResult.images.length} using Expression Board anchor face`);
+
+          try {
+            const swapResult = await this.falService.runFaceSwap({
+              base_image_url: baseImage.url,
+              swap_image_url: anchorFaceUrl,
+            });
+
+            if (swapResult.image) {
+              generatedImages.push({
+                url: swapResult.image.url,
+                width: swapResult.image.width,
+                height: swapResult.image.height,
+              });
+            } else {
+              this.logger.warn(`Face swap failed for image ${i + 1}, keeping original`);
+              generatedImages.push(baseImage);
+            }
+          } catch (swapError) {
+            this.logger.warn(`Face swap error for image ${i + 1}: ${swapError}, keeping original`);
+            generatedImages.push(baseImage);
+          }
+
+          await this.supabase.updateJob(jobId, {
+            progress: 50 + Math.floor((i + 1) / baseResult.images.length * 40),
+            external_status: 'SWAPPING_FACES',
+          });
+        }
+
+        result = { images: generatedImages };
       } else if (mode === 'face-swap' && sourceImageUrl && loraWeightsUrl && loraTriggerWord) {
         // LoRA Face swap mode: generate reference face from LoRA, then swap into source image
-        this.logger.log(`LoRA Face swap mode: generating reference face, then using fal-ai/face-swap`);
+        this.logger.log(`LoRA Face swap mode: generating reference face from LoRA, then using fal-ai/face-swap`);
 
-        // Step 1: Generate a reference face portrait from the LoRA
+        // Step 1: Generate a reference face portrait from the LoRA using FLUX
         const facePrompt = `${loraTriggerWord} portrait photo, face closeup, looking at camera, neutral expression, plain background, high quality`;
 
         await this.supabase.updateJob(jobId, { progress: 20 });
@@ -276,7 +388,7 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
         }
 
         const referenceFaceUrl = faceResult.images[0].url;
-        this.logger.log(`Reference face generated: ${referenceFaceUrl}`);
+        this.logger.log(`Reference face generated from LoRA: ${referenceFaceUrl}`);
 
         await this.supabase.updateJob(jobId, { progress: 50 });
 
@@ -359,8 +471,9 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
           // If we have a reference kit anchor face, use it
           referenceFaceUrl = anchorFaceUrl;
           this.logger.log(`Using reference kit anchor face: ${referenceFaceUrl}`);
-        } else if (loraWeightsUrl && loraTrainer !== 'wan-22') {
-          // For FLUX-trained LoRAs only, generate a reference face
+        } else if (loraWeightsUrl) {
+          // Generate reference face from LoRA using FLUX (can process safetensor files)
+          this.logger.log(`Generating reference face from LoRA using FLUX`);
           const facePrompt = `${loraTriggerWord} portrait photo, face closeup, looking at camera, neutral expression, plain background, high quality`;
           const faceResult = await this.falService.runFluxLoraGeneration({
             prompt: facePrompt,
@@ -372,16 +485,13 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
 
           if (faceResult.images && faceResult.images.length > 0) {
             referenceFaceUrl = faceResult.images[0].url;
-            this.logger.log(`Generated reference face from FLUX LoRA: ${referenceFaceUrl}`);
+            this.logger.log(`Generated reference face from LoRA with FLUX: ${referenceFaceUrl}`);
           } else {
             this.logger.warn('Failed to generate reference face from LoRA, will skip face swap');
           }
         } else {
-          // WAN 2.2 LoRA without character diagram - face swap will be skipped
-          this.logger.warn(
-            `[ImageGeneration] No face reference available for WAN 2.2 LoRA. ` +
-            `Face swap will be skipped. Link a Character Diagram or Reference Kit for face consistency.`
-          );
+          // No face reference available and no LoRA - skip face swap
+          this.logger.warn('No face reference available and no LoRA weights, will skip face swap');
         }
 
         // Step 3: Apply face swap if we have a reference, otherwise use base images
@@ -446,7 +556,7 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
 
       // Download and upload images to Supabase storage
       const uploadedImages: Array<{ url: string; width: number; height: number }> = [];
-      const storageId = loraId || characterDiagramId || referenceKitId || 'unknown';
+      const storageId = loraId || characterDiagramId || referenceKitId || expressionBoardId || 'unknown';
 
       for (let i = 0; i < result.images.length; i++) {
         const image = result.images[i];
@@ -494,6 +604,7 @@ export class ImageGenerationProcessor extends WorkerHost implements OnModuleInit
           loraId,
           characterDiagramId,
           referenceKitId,
+          expressionBoardId,
           aspectRatio,
           numImages,
           loraStrength,

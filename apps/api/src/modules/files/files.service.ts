@@ -108,20 +108,29 @@ export class FilesService {
    * @param videoBuffer - The video file buffer
    * @param maxFrames - Maximum number of frames to extract (default: 50)
    * @param targetFps - Target frames per second to extract (default: 1 fps)
+   * @param upscale - Whether to upscale the video before extraction (default: true)
+   * @param targetResolution - Target resolution for upscaling (default: 1080)
    * @returns Array of uploaded frame URLs
    */
   async extractFramesFromVideo(
     videoBuffer: Buffer,
     maxFrames: number = 50,
     targetFps: number = 1,
+    upscale: boolean = true,
+    targetResolution: number = 1080,
   ): Promise<string[]> {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'video-extract-'));
     const frameUrls: string[] = [];
 
     try {
       // Write video to temp file
-      const videoPath = path.join(tempDir, 'input.mp4');
+      let videoPath = path.join(tempDir, 'input.mp4');
       await fs.writeFile(videoPath, videoBuffer);
+
+      // Upscale video if requested
+      if (upscale) {
+        videoPath = await this.upscaleVideo(videoPath, targetResolution, tempDir);
+      }
 
       // Get video info
       const { stdout: durationStr } = await execAsync(
@@ -131,39 +140,49 @@ export class FilesService {
 
       // Calculate how many frames to extract
       const totalPossibleFrames = Math.floor(duration * targetFps);
-      const framesToExtract = Math.min(totalPossibleFrames, maxFrames);
+      const framesToExtract = Math.min(Math.max(totalPossibleFrames, 1), maxFrames);
 
-      // Calculate interval to get evenly spaced frames
-      const interval = duration / framesToExtract;
-
-      this.logger.log(`Extracting ${framesToExtract} frames from ${duration}s video (interval: ${interval}s)`);
+      this.logger.log(`Extracting ${framesToExtract} frames from ${duration.toFixed(1)}s video`);
 
       // Extract frames
       const framesDir = path.join(tempDir, 'frames');
       await fs.mkdir(framesDir, { recursive: true });
 
+      // Use select filter for evenly spaced frames - more reliable than fps filter
+      // Also specify pixel format for maximum compatibility with image viewers/APIs
+      const selectExpr = framesToExtract === 1
+        ? 'eq(n,0)'
+        : `not(mod(n,${Math.max(1, Math.floor(duration * 30 / framesToExtract))}))`;
+
       await execAsync(
-        `ffmpeg -i "${videoPath}" -vf "fps=1/${interval}" -frames:v ${framesToExtract} "${framesDir}/frame_%04d.png"`,
+        `ffmpeg -i "${videoPath}" -vf "select='${selectExpr}',scale='min(1024,iw)':'min(1024,ih)':force_original_aspect_ratio=decrease" -pix_fmt rgb24 -frames:v ${framesToExtract} -vsync vfr "${framesDir}/frame_%04d.jpg"`,
       );
 
       // Get list of extracted frames
       const frameFiles = await fs.readdir(framesDir);
-      const sortedFrames = frameFiles.filter((f) => f.endsWith('.png')).sort();
+      const sortedFrames = frameFiles.filter((f) => f.endsWith('.jpg')).sort();
 
       this.logger.log(`Extracted ${sortedFrames.length} frames, uploading...`);
 
-      // Upload frames
+      // Upload frames to character-images bucket (known to be public/working)
       const uploadPrefix = `extracted-frames/${Date.now()}`;
       for (let i = 0; i < sortedFrames.length; i++) {
         const framePath = path.join(framesDir, sortedFrames[i]);
         const frameBuffer = await fs.readFile(framePath);
-        const uploadPath = `${uploadPrefix}/frame_${String(i).padStart(4, '0')}.png`;
+
+        // Validate frame is not empty/corrupted
+        if (frameBuffer.length < 1000) {
+          this.logger.warn(`Frame ${i} appears corrupted (${frameBuffer.length} bytes), skipping`);
+          continue;
+        }
+
+        const uploadPath = `${uploadPrefix}/frame_${String(i).padStart(4, '0')}.jpg`;
 
         const { url } = await this.supabaseService.uploadFile(
-          STORAGE_BUCKETS.TRAINING_IMAGES,
+          STORAGE_BUCKETS.CHARACTER_IMAGES,
           uploadPath,
           frameBuffer,
-          'image/png',
+          'image/jpeg',
         );
         frameUrls.push(url);
       }
@@ -257,6 +276,50 @@ export class FilesService {
 
     this.logger.log(`Total images from Google Drive: ${imageUrls.length}`);
     return imageUrls;
+  }
+
+  /**
+   * Upscale video to target resolution using lanczos scaling with sharpening
+   * @param inputPath - Path to input video file
+   * @param targetResolution - Target resolution for the shorter dimension
+   * @param tempDir - Temporary directory for output
+   * @returns Path to upscaled video (or input if no upscaling needed)
+   */
+  private async upscaleVideo(
+    inputPath: string,
+    targetResolution: number,
+    tempDir: string,
+  ): Promise<string> {
+    const upscaledPath = path.join(tempDir, 'upscaled.mp4');
+
+    // Get current video resolution
+    const { stdout: probeOut } = await execAsync(
+      `ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "${inputPath}"`,
+    );
+    const [width, height] = probeOut.trim().split(',').map(Number);
+
+    // Calculate scale factor to reach target resolution (based on shorter dimension)
+    const currentShort = Math.min(width, height);
+    const scaleFactor = targetResolution / currentShort;
+
+    // Only upscale if video is smaller than target
+    if (scaleFactor <= 1.0) {
+      this.logger.log(`Video already at ${width}x${height}, no upscaling needed`);
+      return inputPath;
+    }
+
+    const newWidth = Math.round(width * scaleFactor);
+    const newHeight = Math.round(height * scaleFactor);
+
+    this.logger.log(`Upscaling video from ${width}x${height} to ${newWidth}x${newHeight}`);
+
+    // Use lanczos scaling with unsharp filter for high quality upscaling
+    await execAsync(
+      `ffmpeg -i "${inputPath}" -vf "scale=${newWidth}:${newHeight}:flags=lanczos,unsharp=5:5:1.0:5:5:0.0" -c:v libx264 -preset medium -crf 18 -c:a copy -y "${upscaledPath}"`,
+    );
+
+    this.logger.log('Video upscaling complete');
+    return upscaledPath;
   }
 
   /**

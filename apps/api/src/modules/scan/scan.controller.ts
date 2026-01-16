@@ -15,6 +15,10 @@ import {
   ScanCapture,
   CreateSessionDto,
   CreateCaptureDto,
+  ExportToLoraDto,
+  ExportToCharacterDto,
+  ExportToReferenceKitDto,
+  ExportToEmotionBoardDto,
 } from './scan.service';
 
 @Controller('scan')
@@ -112,10 +116,78 @@ export class ScanController {
   }
 
   /**
+   * Upload video recording for processing
+   */
+  @Post('sessions/:id/video')
+  async uploadVideo(
+    @Param('id') sessionId: string,
+    @Body() body: { videoBase64: string; verificationNumbers: string[] },
+  ): Promise<{ success: boolean; jobId: string }> {
+    return this.scanService.processVideoUpload(
+      sessionId,
+      body.videoBase64,
+      body.verificationNumbers,
+    );
+  }
+
+  /**
    * List all sessions (for debugging)
    */
   @Get('sessions')
   async listSessions(): Promise<ScanSession[]> {
     return this.scanService.listSessions();
+  }
+
+  /**
+   * Export scan captures to LoRA training
+   */
+  @Post('sessions/:id/export/lora')
+  async exportToLora(
+    @Param('id') sessionId: string,
+    @Body() dto: ExportToLoraDto,
+  ): Promise<{ loraId: string; jobId: string }> {
+    return this.scanService.exportToLora(
+      sessionId,
+      dto.name,
+      dto.triggerWord,
+      {
+        steps: dto.steps,
+        learningRate: dto.learningRate,
+        isStyle: dto.isStyle,
+      },
+    );
+  }
+
+  /**
+   * Export scan capture to Character Diagram
+   */
+  @Post('sessions/:id/export/character')
+  async exportToCharacter(
+    @Param('id') sessionId: string,
+    @Body() dto: ExportToCharacterDto,
+  ): Promise<{ characterId: string; jobId: string }> {
+    return this.scanService.exportToCharacter(sessionId, dto.name);
+  }
+
+  /**
+   * Export scan captures to Reference Kit
+   */
+  @Post('sessions/:id/export/reference-kit')
+  async exportToReferenceKit(
+    @Param('id') sessionId: string,
+    @Body() dto: ExportToReferenceKitDto,
+  ): Promise<{ kitId: string; jobId: string }> {
+    return this.scanService.exportToReferenceKit(sessionId, dto.name);
+  }
+
+  /**
+   * Export scan captures to Emotion Board
+   */
+  @Post('sessions/:id/export/emotion-board')
+  async exportToEmotionBoard(
+    @Param('id') sessionId: string,
+    @Body() dto: ExportToEmotionBoardDto,
+  ): Promise<{ boardId: string; jobId: string }> {
+    return this.scanService.exportToEmotionBoard(sessionId, dto.name);
   }
 }

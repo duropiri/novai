@@ -8,9 +8,10 @@ import { FaceSwapProcessor } from './processors/face-swap.processor';
 import { ImageGenerationProcessor } from './processors/image-generation.processor';
 import { VariantProcessor } from './processors/variant.processor';
 import { ReferenceKitProcessor } from './processors/reference-kit.processor';
-import { EmotionBoardProcessor } from './processors/emotion-board.processor';
+import { ExpressionBoardProcessor } from './processors/expression-board.processor';
+import { ScanProcessor } from './processors/scan.processor';
 import { FilesModule } from '../files/files.module';
-import { EmotionBoardModule } from '../emotion-board/emotion-board.module';
+import { ExpressionBoardModule } from '../expression-board/expression-board.module';
 import { FalService } from '../../services/fal.service';
 import { GeminiService } from '../../services/gemini.service';
 import { KlingService } from '../../services/kling.service';
@@ -26,7 +27,7 @@ export { QUEUES } from './queues.constants';
 @Module({
   imports: [
     FilesModule,
-    EmotionBoardModule,
+    ExpressionBoardModule,
     BullModule.registerQueue(
       { name: QUEUES.LORA_TRAINING },
       { name: QUEUES.CHARACTER_DIAGRAM },
@@ -34,7 +35,8 @@ export { QUEUES } from './queues.constants';
       { name: QUEUES.IMAGE_GENERATION },
       { name: QUEUES.VARIANT },
       { name: QUEUES.REFERENCE_KIT },
-      { name: QUEUES.EMOTION_BOARD },
+      { name: QUEUES.EXPRESSION_BOARD },
+      { name: QUEUES.SCAN_VIDEO },
     ),
   ],
   controllers: [JobsController],
@@ -54,7 +56,8 @@ export { QUEUES } from './queues.constants';
     ImageGenerationProcessor,
     VariantProcessor,
     ReferenceKitProcessor,
-    EmotionBoardProcessor,
+    ExpressionBoardProcessor,
+    ScanProcessor,
   ],
   exports: [JobsService],
 })

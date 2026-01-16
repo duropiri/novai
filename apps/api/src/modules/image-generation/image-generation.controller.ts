@@ -29,6 +29,10 @@ class CreateImageGenerationDto {
 
   @IsString()
   @IsOptional()
+  expressionBoardId?: string;
+
+  @IsString()
+  @IsOptional()
   prompt?: string;
 
   @IsString()
@@ -74,16 +78,22 @@ export class ImageGenerationController {
     const hasLora = !!dto.loraId?.trim();
     const hasDiagram = !!dto.characterDiagramId?.trim();
     const hasReferenceKit = !!dto.referenceKitId?.trim();
+    const hasExpressionBoard = !!dto.expressionBoardId?.trim();
 
     // Count how many identity sources are selected
-    const identitySourceCount = [hasLora, hasDiagram, hasReferenceKit].filter(Boolean).length;
+    const identitySourceCount = [hasLora, hasDiagram, hasReferenceKit, hasExpressionBoard].filter(Boolean).length;
 
     // Must select exactly one identity source
     if (identitySourceCount > 1) {
-      throw new HttpException('Select only one: LoRA, Character Diagram, or Reference Kit', HttpStatus.BAD_REQUEST);
+      throw new HttpException('Select only one: LoRA, Character Diagram, Reference Kit, or Expression Board', HttpStatus.BAD_REQUEST);
     }
     if (identitySourceCount === 0) {
-      throw new HttpException('Select a LoRA model, Character Diagram, or Reference Kit', HttpStatus.BAD_REQUEST);
+      throw new HttpException('Select a LoRA model, Character Diagram, Reference Kit, or Expression Board', HttpStatus.BAD_REQUEST);
+    }
+
+    // Expression Board mode needs either prompt (text-to-image) or source image (face swap)
+    if (hasExpressionBoard && !dto.prompt?.trim() && !dto.sourceImageUrl?.trim()) {
+      throw new HttpException('Either prompt or source image is required when using Expression Board', HttpStatus.BAD_REQUEST);
     }
 
     // Character Diagram mode requires source image (face swap only - no generation)
@@ -106,6 +116,7 @@ export class ImageGenerationController {
         loraId: dto.loraId?.trim(),
         characterDiagramId: dto.characterDiagramId?.trim(),
         referenceKitId: dto.referenceKitId?.trim(),
+        expressionBoardId: dto.expressionBoardId?.trim(),
         prompt: dto.prompt?.trim(),
         sourceImageUrl: dto.sourceImageUrl?.trim(),
         aspectRatio: dto.aspectRatio,

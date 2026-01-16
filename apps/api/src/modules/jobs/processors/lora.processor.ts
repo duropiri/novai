@@ -100,25 +100,35 @@ export class LoraProcessor extends WorkerHost {
           onQueueUpdate: async (update) => {
             this.logger.debug(`WAN 2.2 training status: ${update.status}`);
 
-            // Get latest log message for status
-            const lastLog = update.logs?.[update.logs.length - 1]?.message || '';
+            try {
+              // Get latest log message for status
+              const lastLog = update.logs?.[update.logs.length - 1]?.message || '';
 
-            // Update job and model status
-            await this.supabase.updateJob(jobId, {
-              external_status: update.status,
-            });
+              // Update job and model status
+              await this.supabase.updateJob(jobId, {
+                external_status: update.status,
+              });
 
-            await this.supabase.updateLoraModel(loraModelId, {
-              status_message: lastLog || update.status,
-            });
+              await this.supabase.updateLoraModel(loraModelId, {
+                status_message: lastLog || update.status,
+              });
+            } catch (err) {
+              // Don't crash on transient network errors during status updates
+              this.logger.warn(`Failed to update status (non-fatal): ${err instanceof Error ? err.message : err}`);
+            }
           },
           onProgress: async (progress) => {
             this.logger.debug(`WAN 2.2 training progress: ${progress}%`);
 
-            // Update progress
-            await job.updateProgress(progress);
-            await this.supabase.updateJob(jobId, { progress });
-            await this.supabase.updateLoraModel(loraModelId, { progress });
+            try {
+              // Update progress
+              await job.updateProgress(progress);
+              await this.supabase.updateJob(jobId, { progress });
+              await this.supabase.updateLoraModel(loraModelId, { progress });
+            } catch (err) {
+              // Don't crash on transient network errors during progress updates
+              this.logger.warn(`Failed to update progress (non-fatal): ${err instanceof Error ? err.message : err}`);
+            }
           },
         },
       );

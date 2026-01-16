@@ -34,6 +34,7 @@ import {
   MoreVertical,
   Download,
   ExternalLink,
+  XCircle,
   Image as ImageIcon,
   User,
   Users,
@@ -136,7 +137,6 @@ export default function EmotionBoardPage() {
         loraId: sourceType === 'lora' ? selectedLoraId : undefined,
         characterDiagramId: sourceType === 'character' ? selectedCharacterId : undefined,
         referenceKitId: sourceType === 'reference_kit' ? selectedKitId : undefined,
-        gridSize,
       });
 
       // Reset form
@@ -164,6 +164,18 @@ export default function EmotionBoardPage() {
       await loadData();
     } catch (error) {
       console.error('Failed to delete emotion board:', error);
+    }
+  };
+
+  // Cancel emotion board generation
+  const handleCancel = async (id: string) => {
+    if (!confirm('Cancel this emotion board generation?')) return;
+
+    try {
+      await emotionBoardApi.cancel(id);
+      await loadData();
+    } catch (error) {
+      console.error('Failed to cancel emotion board:', error);
     }
   };
 
@@ -548,6 +560,15 @@ export default function EmotionBoardPage() {
                             </DropdownMenuItem>
                           </>
                         )}
+                        {(board.status === 'generating' || board.status === 'pending') && (
+                          <DropdownMenuItem
+                            className="text-yellow-600"
+                            onClick={() => handleCancel(board.id)}
+                          >
+                            <XCircle className="h-4 w-4 mr-2" />
+                            Cancel
+                          </DropdownMenuItem>
+                        )}
                         <DropdownMenuItem
                           className="text-destructive"
                           onClick={() => handleDelete(board.id)}
@@ -571,7 +592,7 @@ export default function EmotionBoardPage() {
           <DialogHeader>
             <DialogTitle>{previewBoard?.name || 'Emotion Board'}</DialogTitle>
             <DialogDescription>
-              {previewBoard?.grid_size} grid with {previewBoard?.emotions.length} emotions
+              {previewBoard?.grid_size} grid with {previewBoard?.expressions?.length || 0} expressions
             </DialogDescription>
           </DialogHeader>
           <div className="flex items-center justify-center bg-muted rounded-lg overflow-hidden">

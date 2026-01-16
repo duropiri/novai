@@ -26,16 +26,18 @@ import {
   loraApi,
   characterApi,
   referenceKitApi,
+  expressionBoardApi,
   imageGenApi,
   filesApi,
   type LoraModel,
   type CharacterDiagram,
   type ReferenceKit,
+  type ExpressionBoard,
   type ImageGenerationJob,
   type GeneratedImage,
 } from '@/lib/api';
 
-type IdentitySource = 'lora' | 'character-diagram' | 'reference-kit';
+type IdentitySource = 'lora' | 'character-diagram' | 'reference-kit' | 'expression-board';
 
 const ASPECT_RATIOS = [
   { value: '1:1', label: '1:1 (Square)' },
@@ -56,6 +58,7 @@ export default function ImageGeneratorPage() {
   const [selectedLora, setSelectedLora] = useState<LoraModel | null>(null);
   const [selectedDiagram, setSelectedDiagram] = useState<CharacterDiagram | null>(null);
   const [selectedReferenceKit, setSelectedReferenceKit] = useState<ReferenceKit | null>(null);
+  const [selectedExpressionBoard, setSelectedExpressionBoard] = useState<ExpressionBoard | null>(null);
 
   // Form state
   const [prompt, setPrompt] = useState('');
@@ -69,12 +72,14 @@ export default function ImageGeneratorPage() {
   const [loras, setLoras] = useState<LoraModel[]>([]);
   const [diagrams, setDiagrams] = useState<CharacterDiagram[]>([]);
   const [referenceKits, setReferenceKits] = useState<ReferenceKit[]>([]);
+  const [expressionBoards, setExpressionBoards] = useState<ExpressionBoard[]>([]);
   const [recentJobs, setRecentJobs] = useState<ImageGenerationJob[]>([]);
 
   // Loading states
   const [isLoadingLoras, setIsLoadingLoras] = useState(true);
   const [isLoadingDiagrams, setIsLoadingDiagrams] = useState(true);
   const [isLoadingReferenceKits, setIsLoadingReferenceKits] = useState(true);
+  const [isLoadingExpressionBoards, setIsLoadingExpressionBoards] = useState(true);
   const [isLoadingJobs, setIsLoadingJobs] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
@@ -117,6 +122,17 @@ export default function ImageGeneratorPage() {
     }
   }, []);
 
+  const fetchExpressionBoards = useCallback(async () => {
+    try {
+      const data = await expressionBoardApi.list();
+      setExpressionBoards(data.filter((b) => b.status === 'ready'));
+    } catch (error) {
+      console.error('Failed to fetch expression boards:', error);
+    } finally {
+      setIsLoadingExpressionBoards(false);
+    }
+  }, []);
+
   const fetchJobs = useCallback(async () => {
     try {
       const data = await imageGenApi.getHistory(20);
@@ -132,21 +148,24 @@ export default function ImageGeneratorPage() {
     fetchLoras();
     fetchDiagrams();
     fetchReferenceKits();
+    fetchExpressionBoards();
     fetchJobs();
 
     // Poll for job updates
     const interval = setInterval(fetchJobs, 5000);
     return () => clearInterval(interval);
-  }, [fetchLoras, fetchDiagrams, fetchReferenceKits, fetchJobs]);
+  }, [fetchLoras, fetchDiagrams, fetchReferenceKits, fetchExpressionBoards, fetchJobs]);
 
   // Calculate estimated cost
   // Flux PuLID (Character Diagram): ~$0.04 per image
   // Reference Kit (Gemini): ~$0.03 per image
+  // Expression Board (Gemini): ~$0.03 per image
   // LoRA Face swap: ~$0.04 per image
   // LoRA Text-to-image: ~$0.03 per image
   const isPulidOrFaceSwap = sourceImage || identitySource === 'character-diagram';
   const isReferenceKitMode = identitySource === 'reference-kit';
-  const costPerImage = isPulidOrFaceSwap ? 0.04 : isReferenceKitMode ? 0.03 : 0.03;
+  const isExpressionBoardMode = identitySource === 'expression-board';
+  const costPerImage = isPulidOrFaceSwap ? 0.04 : (isReferenceKitMode || isExpressionBoardMode) ? 0.03 : 0.03;
   const estimatedCost = (numImages * costPerImage).toFixed(2);
 
   // Handle source image upload
@@ -218,6 +237,14 @@ export default function ImageGeneratorPage() {
       });
       return;
     }
+    if (identitySource === 'expression-board' && !selectedExpressionBoard) {
+      toast({
+        title: 'Missing Selection',
+        description: 'Please select an Expression Board',
+        variant: 'destructive',
+      });
+      return;
+    }
 
     // Text-to-image mode requires prompt (when no source image)
     if (!sourceImage && !prompt.trim()) {
@@ -246,17 +273,20 @@ export default function ImageGeneratorPage() {
           ? { loraId: selectedLora!.id, loraStrength }
           : identitySource === 'character-diagram'
           ? { characterDiagramId: selectedDiagram!.id }
-          : { referenceKitId: selectedReferenceKit!.id }),
+          : identitySource === 'reference-kit'
+          ? { referenceKitId: selectedReferenceKit!.id }
+          : { expressionBoardId: selectedExpressionBoard!.id }),
         prompt: prompt.trim() || undefined,
         sourceImageUrl,
-        // Always pass aspectRatio for character diagram mode or LoRA text-to-image
-        aspectRatio: identitySource === 'character-diagram' || identitySource === 'reference-kit' || !sourceImageUrl ? aspectRatio : undefined,
+        // Always pass aspectRatio for character diagram mode or LoRA text-to-image or expression board
+        aspectRatio: identitySource === 'character-diagram' || identitySource === 'reference-kit' || identitySource === 'expression-board' || !sourceImageUrl ? aspectRatio : undefined,
         numImages,
         imageStrength: sourceImageUrl ? imageStrength : undefined,
       });
 
       const modeText = result.mode === 'character-diagram-swap' ? 'identity generation (Flux PuLID)'
         : result.mode === 'face-swap' ? 'face swap'
+        : result.mode === 'expression-board-swap' ? 'expression board swap'
         : 'image generation';
       toast({
         title: 'Generation Started',
@@ -340,7 +370,8 @@ export default function ImageGeneratorPage() {
   const canGenerate =
     (identitySource === 'lora' && selectedLora && (isFaceSwapMode || prompt.trim())) ||
     (identitySource === 'character-diagram' && selectedDiagram && (isFaceSwapMode || prompt.trim())) ||
-    (identitySource === 'reference-kit' && selectedReferenceKit && (isFaceSwapMode || prompt.trim()));
+    (identitySource === 'reference-kit' && selectedReferenceKit && (isFaceSwapMode || prompt.trim())) ||
+    (identitySource === 'expression-board' && selectedExpressionBoard && (isFaceSwapMode || prompt.trim()));
   const canGenerateNow = canGenerate && !isGenerating;
 
   return (
@@ -359,56 +390,69 @@ export default function ImageGeneratorPage() {
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-lg">
-                {identitySource === 'lora' ? <Sparkles className="w-5 h-5" /> : identitySource === 'reference-kit' ? <Users className="w-5 h-5" /> : <User className="w-5 h-5" />}
+                {identitySource === 'lora' ? <Sparkles className="w-5 h-5" /> : identitySource === 'reference-kit' ? <Users className="w-5 h-5" /> : identitySource === 'expression-board' ? <ImageIcon className="w-5 h-5" /> : <User className="w-5 h-5" />}
                 1. Select Identity Source
                 <Badge variant="secondary" className="ml-1">Required</Badge>
-                {(selectedLora || selectedDiagram || selectedReferenceKit) && <Badge variant="outline" className="ml-auto">Selected</Badge>}
+                {(selectedLora || selectedDiagram || selectedReferenceKit || selectedExpressionBoard) && <Badge variant="outline" className="ml-auto">Selected</Badge>}
               </CardTitle>
               <CardDescription>
                 Choose an identity source for face generation
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              {/* Toggle between LoRA, Character Diagram, and Reference Kit */}
-              <div className="flex gap-2">
+              {/* Toggle between LoRA, Character Diagram, Reference Kit, and Expression Board */}
+              <div className="grid grid-cols-4 gap-2">
                 <Button
                   variant={identitySource === 'lora' ? 'default' : 'outline'}
                   size="sm"
-                  className="flex-1"
                   onClick={() => {
                     setIdentitySource('lora');
                     setSelectedDiagram(null);
                     setSelectedReferenceKit(null);
+                    setSelectedExpressionBoard(null);
                   }}
                 >
-                  <Sparkles className="w-4 h-4 mr-2" />
+                  <Sparkles className="w-4 h-4 mr-1" />
                   LoRA
                 </Button>
                 <Button
                   variant={identitySource === 'character-diagram' ? 'default' : 'outline'}
                   size="sm"
-                  className="flex-1"
                   onClick={() => {
                     setIdentitySource('character-diagram');
                     setSelectedLora(null);
                     setSelectedReferenceKit(null);
+                    setSelectedExpressionBoard(null);
                   }}
                 >
-                  <User className="w-4 h-4 mr-2" />
+                  <User className="w-4 h-4 mr-1" />
                   Diagram
                 </Button>
                 <Button
                   variant={identitySource === 'reference-kit' ? 'default' : 'outline'}
                   size="sm"
-                  className="flex-1"
                   onClick={() => {
                     setIdentitySource('reference-kit');
                     setSelectedLora(null);
                     setSelectedDiagram(null);
+                    setSelectedExpressionBoard(null);
                   }}
                 >
-                  <Users className="w-4 h-4 mr-2" />
+                  <Users className="w-4 h-4 mr-1" />
                   Ref Kit
+                </Button>
+                <Button
+                  variant={identitySource === 'expression-board' ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => {
+                    setIdentitySource('expression-board');
+                    setSelectedLora(null);
+                    setSelectedDiagram(null);
+                    setSelectedReferenceKit(null);
+                  }}
+                >
+                  <ImageIcon className="w-4 h-4 mr-1" />
+                  Expr Board
                 </Button>
               </div>
 
@@ -418,7 +462,8 @@ export default function ImageGeneratorPage() {
                 <ul className="text-muted-foreground space-y-0.5">
                   <li>• <strong>LoRA</strong> — Trained on real photos, highest accuracy (~$5, 1 hour)</li>
                   <li>• <strong>Diagram</strong> — Single reference image, quick face swaps</li>
-                  <li>• <strong>Ref Kit</strong> — Multi-angle AI references, best for AI characters (~$0.20, instant)</li>
+                  <li>• <strong>Ref Kit</strong> — Multi-angle AI references (~$0.20, instant)</li>
+                  <li>• <strong>Expr Board</strong> — Pre-generated expression set, multi-angle references</li>
                 </ul>
               </div>
 
@@ -572,6 +617,57 @@ export default function ImageGeneratorPage() {
                       <p className="text-sm font-medium truncate">{selectedReferenceKit.name}</p>
                       <p className="text-xs text-muted-foreground">
                         Multi-reference identity preservation (anchor + profile)
+                      </p>
+                    </div>
+                  )}
+                </>
+              ) : identitySource === 'expression-board' ? (
+                // Expression Board selector
+                <>
+                  {isLoadingExpressionBoards ? (
+                    <div className="flex items-center justify-center py-8">
+                      <Loader2 className="w-6 h-6 animate-spin" />
+                    </div>
+                  ) : expressionBoards.length === 0 ? (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <p>No Expression Boards found</p>
+                      <p className="text-sm">Create an Expression Board first</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-3 gap-2 max-h-48 overflow-y-auto">
+                      {expressionBoards.map((board) => (
+                        <button
+                          key={board.id}
+                          onClick={() => setSelectedExpressionBoard(board)}
+                          className={`relative aspect-square rounded-md overflow-hidden border-2 transition-all ${
+                            selectedExpressionBoard?.id === board.id
+                              ? 'border-primary ring-2 ring-primary/50'
+                              : 'border-transparent hover:border-muted-foreground/50'
+                          }`}
+                        >
+                          {board.board_url ? (
+                            <img
+                              src={board.board_url}
+                              alt={board.name || 'Expression Board'}
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <div className="w-full h-full bg-muted flex items-center justify-center">
+                              <ImageIcon className="w-6 h-6 text-muted-foreground" />
+                            </div>
+                          )}
+                          <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-xs p-1 truncate text-center">
+                            {board.name || 'Expression Board'}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {selectedExpressionBoard && (
+                    <div className="p-2 bg-muted rounded-md">
+                      <p className="text-sm font-medium truncate">{selectedExpressionBoard.name || 'Expression Board'}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {selectedExpressionBoard.expressions?.length || 0} expressions available
                       </p>
                     </div>
                   )}
@@ -827,6 +923,10 @@ export default function ImageGeneratorPage() {
                     ? 'Select a LoRA model'
                     : identitySource === 'character-diagram' && !selectedDiagram
                     ? 'Select a Character Diagram'
+                    : identitySource === 'reference-kit' && !selectedReferenceKit
+                    ? 'Select a Reference Kit'
+                    : identitySource === 'expression-board' && !selectedExpressionBoard
+                    ? 'Select an Expression Board'
                     : !sourceImage && !prompt.trim()
                     ? 'Enter a prompt or upload a source image'
                     : ''}

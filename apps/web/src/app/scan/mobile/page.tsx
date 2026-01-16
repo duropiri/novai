@@ -1,40 +1,33 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback, Suspense } from 'react';
+import { useState, useEffect, useRef, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
-import { ANGLE_DISPLAY_NAMES, scanApi } from '@/lib/api';
+import { scanApi } from '@/lib/api';
 import { useScanSocket } from '@/lib/scan-socket';
 import {
   initializeFaceDetection,
-  detectFace,
-  classifyAngle,
-  shouldAutoCapture,
-  captureFrame,
-  compressFrame,
   cleanupFaceDetection,
-  type FaceDetectionResult,
-  type AngleType,
 } from '@/lib/face-detection';
-import { FaceOverlay } from '@/components/scan/face-overlay';
-import {
-  Camera,
-  Loader2,
-  Check,
-  WifiOff,
-  RefreshCw,
-  X,
-} from 'lucide-react';
+import { Loader2, Check, WifiOff, RefreshCw } from 'lucide-react';
 
 type AppState =
   | 'entering-code'
   | 'connecting'
-  | 'initializing'
-  | 'scanning'
+  | 'ready'
+  | 'recording'
+  | 'processing'
   | 'completed'
   | 'error';
+
+// Generate random 2-digit numbers for verification
+function generateVerificationNumbers(): string[] {
+  return Array.from({ length: 3 }, () =>
+    String(Math.floor(Math.random() * 90) + 10)
+  );
+}
 
 function MobilePageContent() {
   const searchParams = useSearchParams();
@@ -49,26 +42,24 @@ function MobilePageContent() {
 
   // Session state
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [targetAngles, setTargetAngles] = useState<string[]>([]);
-  const [currentAngleIndex, setCurrentAngleIndex] = useState(0);
-  const [capturedAngles, setCapturedAngles] = useState<Set<string>>(new Set());
-  const [autoCaptureEnabled, setAutoCaptureEnabled] = useState(true);
+  const [verificationNumbers] = useState<string[]>(generateVerificationNumbers);
 
   // Camera state
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const [cameraReady, setCameraReady] = useState(false);
 
-  // Face detection state
-  const [detection, setDetection] = useState<FaceDetectionResult | null>(null);
-  const [message, setMessage] = useState<string>('');
-  const detectionLoopRef = useRef<number | null>(null);
-  const lastCaptureTimeRef = useRef<number>(0);
-  const frameCountRef = useRef(0);
+  // Recording state
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const [recordingProgress, setRecordingProgress] = useState(0);
+  const [currentInstruction, setCurrentInstruction] = useState('');
+  const [currentStepIndex, setCurrentStepIndex] = useState(0);
+  const [stepProgress, setStepProgress] = useState(0);
+  const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Capture feedback
-  const [showCaptureFlash, setShowCaptureFlash] = useState(false);
-  const [lastCapturedAngle, setLastCapturedAngle] = useState<string | null>(null);
+  // Frame streaming
+  const detectionLoopRef = useRef<number | null>(null);
 
   // Socket connection
   const {
@@ -77,33 +68,12 @@ function MobilePageContent() {
     disconnect,
     connectWithCode,
     sendFrame,
-    sendCapture,
   } = useScanSocket({
     role: 'phone',
     events: {
-      onGuideUpdate: ({ targetAngle }) => {
-        const index = targetAngles.indexOf(targetAngle);
-        if (index !== -1) {
-          setCurrentAngleIndex(index);
-        }
-      },
       onSessionEnded: () => {
         setAppState('completed');
         stopCamera();
-      },
-      onCaptureConfirmed: ({ captureId, angle }) => {
-        console.log('Capture confirmed:', captureId, angle);
-        setCapturedAngles((prev) => new Set([...prev, angle]));
-        setLastCapturedAngle(angle);
-
-        // Move to next angle
-        const nextIndex = currentAngleIndex + 1;
-        if (nextIndex < targetAngles.length) {
-          setCurrentAngleIndex(nextIndex);
-        } else {
-          // All angles captured
-          setAppState('completed');
-        }
       },
       onError: (errorMsg) => {
         setError(errorMsg);
@@ -112,37 +82,76 @@ function MobilePageContent() {
     },
   });
 
-  // Get current target angle
-  const currentTargetAngle = targetAngles[currentAngleIndex] as AngleType | undefined;
+  // Check if we're in a secure context (HTTPS or localhost)
+  const isSecureContext =
+    typeof window !== 'undefined' &&
+    (window.isSecureContext ||
+      window.location.hostname === 'localhost' ||
+      window.location.hostname === '127.0.0.1');
 
   // Start camera
   const startCamera = async () => {
+    if (!isSecureContext) {
+      setError(
+        'Camera requires HTTPS. Please access this page via HTTPS.'
+      );
+      setAppState('error');
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError('Camera not supported on this device or browser.');
+      setAppState('error');
+      return;
+    }
+
+    if (!videoRef.current) {
+      console.error('Video element not ready');
+      return;
+    }
+
     try {
+      console.log('Requesting camera access...');
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: 'user',
           width: { ideal: 1280 },
           height: { ideal: 720 },
         },
-        audio: false,
+        audio: true,
       });
 
+      console.log('Camera access granted');
       streamRef.current = stream;
 
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-        setCameraReady(true);
-      }
+      const video = videoRef.current;
+      video.srcObject = stream;
+
+      // Wait for video to be ready
+      await new Promise<void>((resolve) => {
+        if (video.readyState >= 2) {
+          resolve();
+        } else {
+          video.onloadeddata = () => resolve();
+        }
+      });
+
+      await video.play();
+      console.log('Camera playing:', video.videoWidth, 'x', video.videoHeight);
+      setCameraReady(true);
     } catch (err) {
       console.error('Camera error:', err);
-      setError('Failed to access camera. Please allow camera permissions.');
+      setError('Failed to access camera. Please allow camera and microphone permissions.');
       setAppState('error');
     }
   };
 
   // Stop camera
   const stopCamera = () => {
+    if (detectionLoopRef.current) {
+      cancelAnimationFrame(detectionLoopRef.current);
+      detectionLoopRef.current = null;
+    }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
@@ -161,32 +170,25 @@ function MobilePageContent() {
     setError(null);
 
     try {
-      // Connect to WebSocket
-      connect();
+      // Wait for socket to actually connect
+      const connected = await connect();
+      if (!connected) {
+        throw new Error('Failed to connect to server');
+      }
 
-      // Wait for connection
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-
-      // Connect with session code
+      console.log('Socket connected, joining session...');
       const result = await connectWithCode(sessionCode.toUpperCase());
+      console.log('connectWithCode result:', result);
 
       if (!result.success) {
         throw new Error(result.error || 'Failed to connect');
       }
 
       setSessionId(result.sessionId!);
-      setTargetAngles(result.targetAngles || []);
-      setAutoCaptureEnabled(result.autoCaptureEnabled ?? true);
-      setCapturedAngles(new Set(result.capturedAngles || []));
-
-      // Initialize face detection
-      setAppState('initializing');
+      console.log('Initializing face detection...');
       await initializeFaceDetection();
-
-      // Start camera
-      await startCamera();
-
-      setAppState('scanning');
+      console.log('Setting state to ready');
+      setAppState('ready');
     } catch (err) {
       console.error('Connection error:', err);
       setError(err instanceof Error ? err.message : 'Failed to connect');
@@ -194,105 +196,199 @@ function MobilePageContent() {
     }
   };
 
-  // Detection loop
+  // Start camera when video element is available and state is ready
   useEffect(() => {
-    if (appState !== 'scanning' || !cameraReady || !videoRef.current) {
-      return;
+    if (appState === 'ready' && videoRef.current && !cameraReady) {
+      // Small delay to ensure DOM is updated
+      const timer = setTimeout(() => {
+        startCamera();
+      }, 100);
+      return () => clearTimeout(timer);
     }
+  }, [appState, cameraReady]);
 
-    let lastFrameTime = 0;
-    const FRAME_INTERVAL = 100; // 10 FPS for detection
-    const STREAM_INTERVAL = 66; // ~15 FPS for streaming
+  // Recording instructions sequence
+  const instructions = [
+    'Say the numbers on screen',
+    'Look straight ahead',
+    'Slowly turn left',
+    'Slowly turn right',
+    'Tilt your head up slightly',
+    'Tilt your head down slightly',
+    'Smile naturally',
+  ];
 
-    const runDetection = (timestamp: number) => {
-      if (!videoRef.current || appState !== 'scanning') return;
+  // Start recording
+  const handleStartRecording = () => {
+    if (!streamRef.current) return;
 
-      // Run face detection
-      const result = detectFace(videoRef.current, timestamp);
-      setDetection(result);
+    recordedChunksRef.current = [];
+    setRecordingProgress(0);
+    setCurrentStepIndex(0);
+    setStepProgress(0);
+    setCurrentInstruction(instructions[0]);
+    setAppState('recording');
 
-      // Check for auto-capture
-      if (
-        autoCaptureEnabled &&
-        currentTargetAngle &&
-        result.detected &&
-        result.eulerAngles
-      ) {
-        const captureCheck = shouldAutoCapture(
-          result,
-          currentTargetAngle,
-          capturedAngles
-        );
+    const mediaRecorder = new MediaRecorder(streamRef.current, {
+      mimeType: 'video/webm;codecs=vp9',
+    });
 
-        setMessage(captureCheck.reason || '');
+    mediaRecorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        recordedChunksRef.current.push(event.data);
+      }
+    };
 
-        // Auto-capture with debounce
-        const now = Date.now();
-        if (captureCheck.shouldCapture && now - lastCaptureTimeRef.current > 2000) {
-          lastCaptureTimeRef.current = now;
-          handleCapture();
+    mediaRecorder.onstop = () => {
+      handleRecordingComplete();
+    };
+
+    mediaRecorderRef.current = mediaRecorder;
+    mediaRecorder.start(100);
+
+    // Step durations: 8s for numbers, 3s for each pose
+    const stepDurations = [8000, 3000, 3000, 3000, 3000, 3000, 3000];
+    const totalDuration = stepDurations.reduce((a, b) => a + b, 0);
+    let elapsed = 0;
+
+    recordingTimerRef.current = setInterval(() => {
+      elapsed += 100;
+      setRecordingProgress((elapsed / totalDuration) * 100);
+
+      // Find current step based on cumulative durations
+      let cumulativeTime = 0;
+      let instructionIndex = 0;
+      for (let i = 0; i < stepDurations.length; i++) {
+        if (elapsed < cumulativeTime + stepDurations[i]) {
+          instructionIndex = i;
+          break;
+        }
+        cumulativeTime += stepDurations[i];
+        if (i === stepDurations.length - 1) {
+          instructionIndex = i;
         }
       }
 
-      // Send preview frame periodically
-      frameCountRef.current++;
-      if (timestamp - lastFrameTime > STREAM_INTERVAL) {
-        lastFrameTime = timestamp;
-        sendPreviewFrame();
+      // Calculate progress within current step (0-100%)
+      const elapsedInStep = elapsed - cumulativeTime;
+      const currentStepDuration = stepDurations[instructionIndex];
+      const stepProgressPercent = Math.min((elapsedInStep / currentStepDuration) * 100, 100);
+
+      setCurrentStepIndex(instructionIndex);
+      setStepProgress(stepProgressPercent);
+      setCurrentInstruction(instructions[instructionIndex]);
+
+      if (elapsed >= totalDuration) {
+        clearInterval(recordingTimerRef.current!);
+        mediaRecorder.stop();
+      }
+    }, 100);
+  };
+
+  // Handle recording complete
+  const handleRecordingComplete = async () => {
+    setAppState('processing');
+
+    try {
+      const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
+
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        const base64 = (reader.result as string).split(',')[1];
+
+        if (sessionId) {
+          await scanApi.uploadScanVideo(sessionId, base64, verificationNumbers);
+        }
+
+        setAppState('completed');
+      };
+      reader.readAsDataURL(blob);
+    } catch (err) {
+      console.error('Upload error:', err);
+      setError('Failed to upload recording. Please try again.');
+      setAppState('error');
+    }
+  };
+
+  // Stream preview frames to desktop
+  const streamCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const streamCtxRef = useRef<CanvasRenderingContext2D | null>(null);
+
+  useEffect(() => {
+    if (
+      (appState !== 'ready' && appState !== 'recording') ||
+      !cameraReady ||
+      !videoRef.current ||
+      connectionState !== 'connected'
+    ) {
+      return;
+    }
+
+    console.log('Starting frame streaming at 30fps...');
+    let lastFrameTime = 0;
+    const STREAM_INTERVAL = 33; // ~30fps
+
+    // Create reusable canvas for better performance
+    if (!streamCanvasRef.current) {
+      streamCanvasRef.current = document.createElement('canvas');
+    }
+    const canvas = streamCanvasRef.current;
+    const video = videoRef.current;
+
+    // Set canvas size once
+    const scale = 0.5;
+    canvas.width = video.videoWidth * scale;
+    canvas.height = video.videoHeight * scale;
+
+    if (!streamCtxRef.current) {
+      streamCtxRef.current = canvas.getContext('2d', { alpha: false });
+    }
+    const ctx = streamCtxRef.current;
+
+    const streamFrames = (timestamp: number) => {
+      if (
+        !videoRef.current ||
+        (appState !== 'ready' && appState !== 'recording') ||
+        connectionState !== 'connected'
+      ) {
+        return;
       }
 
-      detectionLoopRef.current = requestAnimationFrame(runDetection);
+      if (timestamp - lastFrameTime > STREAM_INTERVAL) {
+        lastFrameTime = timestamp;
+
+        if (video.videoWidth > 0 && video.videoHeight > 0 && ctx) {
+          try {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            canvas.toBlob(
+              (blob) => {
+                if (blob) {
+                  blob.arrayBuffer().then((buffer) => {
+                    sendFrame(buffer);
+                  });
+                }
+              },
+              'image/jpeg',
+              0.6
+            );
+          } catch (err) {
+            // Ignore errors
+          }
+        }
+      }
+
+      detectionLoopRef.current = requestAnimationFrame(streamFrames);
     };
 
-    detectionLoopRef.current = requestAnimationFrame(runDetection);
+    detectionLoopRef.current = requestAnimationFrame(streamFrames);
 
     return () => {
       if (detectionLoopRef.current) {
         cancelAnimationFrame(detectionLoopRef.current);
       }
     };
-  }, [appState, cameraReady, currentTargetAngle, capturedAngles, autoCaptureEnabled]);
-
-  // Send preview frame
-  const sendPreviewFrame = async () => {
-    if (!videoRef.current || connectionState !== 'connected') return;
-
-    try {
-      const frameData = await compressFrame(videoRef.current, 0.5);
-      sendFrame(frameData);
-    } catch (err) {
-      console.error('Failed to send frame:', err);
-    }
-  };
-
-  // Handle manual/auto capture
-  const handleCapture = async () => {
-    if (!videoRef.current || !currentTargetAngle) return;
-
-    try {
-      // Show flash feedback
-      setShowCaptureFlash(true);
-      setTimeout(() => setShowCaptureFlash(false), 200);
-
-      // Capture high-quality frame
-      const imageBase64 = captureFrame(videoRef.current, 0.9);
-
-      // Send capture
-      const result = await sendCapture({
-        imageBase64,
-        detectedAngle: currentTargetAngle,
-        eulerAngles: detection?.eulerAngles || undefined,
-        qualityScore: detection?.confidence || undefined,
-        isAutoCaptured: autoCaptureEnabled,
-      });
-
-      if (!result.success) {
-        console.error('Capture failed:', result.error);
-      }
-    } catch (err) {
-      console.error('Capture error:', err);
-    }
-  };
+  }, [appState, cameraReady, connectionState, sendFrame]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -300,8 +396,11 @@ function MobilePageContent() {
       stopCamera();
       cleanupFaceDetection();
       disconnect();
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+      }
     };
-  }, []);
+  }, [disconnect]);
 
   // Auto-connect if code provided in URL
   useEffect(() => {
@@ -310,203 +409,217 @@ function MobilePageContent() {
     }
   }, []);
 
-  // Render based on app state
-  if (appState === 'entering-code') {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-screen p-6">
-        <Camera className="w-16 h-16 mb-6 text-white/80" />
-        <h1 className="text-2xl font-bold mb-2">Face Scanner</h1>
-        <p className="text-white/60 text-center mb-8">
-          Enter the session code shown on your computer
-        </p>
+  // Determine if camera view should be shown
+  const showCamera = appState === 'ready' || appState === 'recording';
 
-        <div className="w-full max-w-xs space-y-4">
-          <Input
-            type="text"
-            value={sessionCode}
-            onChange={(e) => setSessionCode(e.target.value.toUpperCase())}
-            placeholder="Enter code (e.g., ABC12345)"
-            className="text-center text-xl font-mono tracking-widest bg-white/10 border-white/20 text-white placeholder:text-white/40"
-            maxLength={8}
-          />
-          <Button
-            onClick={handleSubmitCode}
-            className="w-full"
-            size="lg"
-            disabled={!sessionCode || sessionCode.length < 6}
-          >
-            Connect
-          </Button>
-        </div>
-
-        {error && (
-          <p className="text-red-400 text-sm mt-4 text-center">{error}</p>
-        )}
-      </div>
-    );
-  }
-
-  if (appState === 'connecting' || appState === 'initializing') {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-screen p-6">
-        <Loader2 className="w-12 h-12 animate-spin mb-4" />
-        <p className="text-white/80">
-          {appState === 'connecting'
-            ? 'Connecting to session...'
-            : 'Initializing camera...'}
-        </p>
-      </div>
-    );
-  }
-
-  if (appState === 'error') {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-screen p-6">
-        <WifiOff className="w-16 h-16 mb-6 text-red-400" />
-        <h1 className="text-xl font-bold mb-2">Connection Error</h1>
-        <p className="text-white/60 text-center mb-6">{error}</p>
-        <Button
-          onClick={() => {
-            setAppState('entering-code');
-            setError(null);
-          }}
-          variant="outline"
-        >
-          <RefreshCw className="w-4 h-4 mr-2" />
-          Try Again
-        </Button>
-      </div>
-    );
-  }
-
-  if (appState === 'completed') {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-screen p-6">
-        <div className="w-20 h-20 rounded-full bg-green-500 flex items-center justify-center mb-6">
-          <Check className="w-10 h-10" />
-        </div>
-        <h1 className="text-2xl font-bold mb-2">Scan Complete!</h1>
-        <p className="text-white/60 text-center mb-2">
-          {capturedAngles.size} angles captured successfully
-        </p>
-        <p className="text-white/40 text-sm text-center mb-8">
-          You can close this page now
-        </p>
-        <Button
-          onClick={() => {
-            setAppState('entering-code');
-            setSessionCode('');
-            setCapturedAngles(new Set());
-          }}
-          variant="outline"
-        >
-          Start New Session
-        </Button>
-      </div>
-    );
-  }
-
-  // Scanning state
   return (
-    <div className="relative h-screen overflow-hidden">
-      {/* Camera feed */}
+    <div className="relative h-[100dvh] overflow-hidden bg-black text-white">
+      {/* Video element - always rendered but only visible when needed */}
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
-        className="absolute inset-0 w-full h-full object-cover"
-        style={{ transform: 'scaleX(-1)' }} // Mirror for selfie view
+        className={cn(
+          'absolute inset-0 w-full h-full object-cover transition-opacity duration-300',
+          showCamera ? 'opacity-100' : 'opacity-0 pointer-events-none'
+        )}
+        style={{ transform: 'scaleX(-1)' }}
       />
 
-      {/* Face overlay */}
-      {currentTargetAngle && (
-        <FaceOverlay
-          detection={detection}
-          targetAngle={currentTargetAngle}
-          message={message}
-        />
-      )}
+      {/* Content overlay */}
+      <div className="absolute inset-0 flex flex-col">
+        {/* Entering Code */}
+        {appState === 'entering-code' && (
+          <div className="flex-1 flex flex-col items-center justify-center p-6">
+            <h1 className="text-2xl font-bold mb-2">Face Scan</h1>
+            <p className="text-white/60 text-center mb-8">
+              Enter the session code shown on your computer
+            </p>
 
-      {/* Capture flash */}
-      {showCaptureFlash && (
-        <div className="absolute inset-0 bg-white/50 animate-pulse" />
-      )}
-
-      {/* Progress bar */}
-      <div className="absolute top-0 left-0 right-0 safe-area-inset-top">
-        <div className="h-1 bg-white/20">
-          <div
-            className="h-full bg-green-500 transition-all duration-300"
-            style={{
-              width: `${(capturedAngles.size / targetAngles.length) * 100}%`,
-            }}
-          />
-        </div>
-      </div>
-
-      {/* Captured angles indicators */}
-      <div className="absolute top-4 left-4 right-4 flex justify-center gap-2 safe-area-inset-top">
-        {targetAngles.map((angle, index) => {
-          const isCaptured = capturedAngles.has(angle);
-          const isCurrent = index === currentAngleIndex;
-
-          return (
-            <div
-              key={angle}
-              className={cn(
-                'w-8 h-8 rounded-full flex items-center justify-center text-xs',
-                'transition-all duration-200',
-                isCaptured && 'bg-green-500',
-                isCurrent && !isCaptured && 'bg-white/30 ring-2 ring-white',
-                !isCaptured && !isCurrent && 'bg-white/10'
-              )}
-            >
-              {isCaptured ? (
-                <Check className="w-4 h-4" />
-              ) : (
-                <span className="font-medium">{index + 1}</span>
-              )}
+            <div className="w-full max-w-xs space-y-4">
+              <Input
+                type="text"
+                value={sessionCode}
+                onChange={(e) => setSessionCode(e.target.value.toUpperCase())}
+                placeholder="Enter code"
+                className="text-center text-xl font-mono tracking-widest bg-white/10 border-white/20 text-white placeholder:text-white/40"
+                maxLength={8}
+              />
+              <Button
+                onClick={handleSubmitCode}
+                className="w-full"
+                size="lg"
+                disabled={!sessionCode || sessionCode.length < 6}
+              >
+                Connect
+              </Button>
             </div>
-          );
-        })}
-      </div>
 
-      {/* Last captured feedback */}
-      {lastCapturedAngle && (
-        <div className="absolute top-16 left-1/2 -translate-x-1/2 safe-area-inset-top">
-          <div className="px-4 py-2 bg-green-500/90 rounded-full text-sm font-medium animate-bounce">
-            <Check className="w-4 h-4 inline-block mr-1" />
-            {ANGLE_DISPLAY_NAMES[lastCapturedAngle]} captured!
+            {error && (
+              <p className="text-red-400 text-sm mt-4 text-center">{error}</p>
+            )}
           </div>
-        </div>
-      )}
+        )}
 
-      {/* Manual capture button */}
-      <div className="absolute bottom-8 left-0 right-0 flex justify-center safe-area-inset-bottom">
-        <Button
-          onClick={handleCapture}
-          size="lg"
-          className="w-20 h-20 rounded-full bg-white/90 hover:bg-white text-black"
-          disabled={!currentTargetAngle || capturedAngles.has(currentTargetAngle)}
-        >
-          <Camera className="w-8 h-8" />
-        </Button>
+        {/* Connecting */}
+        {appState === 'connecting' && (
+          <div className="flex-1 flex flex-col items-center justify-center p-6">
+            <Loader2 className="w-12 h-12 animate-spin mb-4" />
+            <p className="text-white/80">Connecting...</p>
+          </div>
+        )}
+
+        {/* Error */}
+        {appState === 'error' && (
+          <div className="flex-1 flex flex-col items-center justify-center p-6">
+            <WifiOff className="w-16 h-16 mb-6 text-red-400" />
+            <h1 className="text-xl font-bold mb-2">Connection Error</h1>
+            <p className="text-white/60 text-center mb-6">{error}</p>
+            <Button
+              onClick={() => {
+                setAppState('entering-code');
+                setError(null);
+              }}
+              variant="outline"
+            >
+              <RefreshCw className="w-4 h-4 mr-2" />
+              Try Again
+            </Button>
+          </div>
+        )}
+
+        {/* Completed */}
+        {appState === 'completed' && (
+          <div className="flex-1 flex flex-col items-center justify-center p-6">
+            <div className="w-20 h-20 rounded-full bg-green-500 flex items-center justify-center mb-6">
+              <Check className="w-10 h-10" />
+            </div>
+            <h1 className="text-2xl font-bold mb-2">Scan Complete!</h1>
+            <p className="text-white/60 text-center mb-2">
+              Your face scan has been uploaded
+            </p>
+            <p className="text-white/40 text-sm text-center">
+              You can close this page now
+            </p>
+          </div>
+        )}
+
+        {/* Processing */}
+        {appState === 'processing' && (
+          <div className="flex-1 flex flex-col items-center justify-center p-6">
+            <Loader2 className="w-12 h-12 animate-spin mb-4" />
+            <p className="text-white/80">Processing your scan...</p>
+          </div>
+        )}
+
+        {/* Ready / Recording - Camera overlay */}
+        {showCamera && (
+          <>
+            {/* Loading indicator while camera initializes */}
+            {!cameraReady && (
+              <div className="flex-1 flex flex-col items-center justify-center">
+                <Loader2 className="w-12 h-12 animate-spin mb-4" />
+                <p className="text-white/80">Starting camera...</p>
+              </div>
+            )}
+
+            {/* Camera ready - show instructions */}
+            {cameraReady && (
+              <>
+                <div className="flex-1 flex items-center justify-center p-6">
+                  <div className="text-center">
+                    {appState === 'ready' ? (
+                      <>
+                        <p className="text-xl font-medium text-white mb-4 drop-shadow-lg">
+                          Start recording and say the numbers on the screen
+                        </p>
+                        <p className="text-sm text-white/80 drop-shadow">
+                          You'll be guided through different poses
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        {/* Step indicator */}
+                        <p className="text-sm text-white/60 mb-2 drop-shadow">
+                          Step {currentStepIndex + 1} of {instructions.length}
+                        </p>
+
+                        {/* Current instruction */}
+                        {currentStepIndex === 0 ? (
+                          <div className="text-center">
+                            <p className="text-xl font-medium text-white mb-6 drop-shadow-lg">
+                              Say the numbers below
+                            </p>
+                            <div className="flex justify-center gap-6">
+                              {verificationNumbers.map((num, i) => (
+                                <span
+                                  key={i}
+                                  className="text-5xl font-bold text-white drop-shadow-lg"
+                                >
+                                  {num}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="text-2xl font-medium text-white drop-shadow-lg">
+                            {currentInstruction}
+                          </p>
+                        )}
+
+                        {/* Segmented progress bar */}
+                        <div className="mt-8 w-72 mx-auto">
+                          <div className="flex gap-1">
+                            {instructions.map((_, index) => (
+                              <div
+                                key={index}
+                                className="flex-1 h-1.5 bg-white/20 rounded-full overflow-hidden"
+                              >
+                                <div
+                                  className="h-full bg-white transition-all duration-100 ease-linear"
+                                  style={{
+                                    width: index < currentStepIndex
+                                      ? '100%'
+                                      : index === currentStepIndex
+                                        ? `${stepProgress}%`
+                                        : '0%'
+                                  }}
+                                />
+                              </div>
+                            ))}
+                          </div>
+                          {/* Time remaining for current step */}
+                          <p className="text-xs text-white/50 mt-2 text-center">
+                            {Math.ceil((100 - stepProgress) / 100 * (currentStepIndex === 0 ? 8 : 3))}s remaining
+                          </p>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <div className="p-6 pb-8">
+                  {appState === 'ready' ? (
+                    <Button
+                      onClick={handleStartRecording}
+                      size="lg"
+                      className="w-full bg-white text-black hover:bg-white/90 font-semibold text-lg py-6"
+                    >
+                      Start Recording
+                    </Button>
+                  ) : (
+                    <div className="flex items-center justify-center">
+                      <div className="w-4 h-4 bg-red-500 rounded-full animate-pulse mr-2" />
+                      <span className="text-white font-medium">Recording...</span>
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </>
+        )}
       </div>
-
-      {/* Cancel button */}
-      <Button
-        variant="ghost"
-        size="icon"
-        className="absolute top-4 right-4 text-white/80 safe-area-inset-top"
-        onClick={() => {
-          stopCamera();
-          disconnect();
-          setAppState('entering-code');
-        }}
-      >
-        <X className="w-6 h-6" />
-      </Button>
     </div>
   );
 }
@@ -515,8 +628,8 @@ export default function MobilePage() {
   return (
     <Suspense
       fallback={
-        <div className="flex items-center justify-center min-h-screen">
-          <Loader2 className="w-8 h-8 animate-spin" />
+        <div className="flex items-center justify-center min-h-[100dvh] bg-black">
+          <Loader2 className="w-8 h-8 animate-spin text-white" />
         </div>
       }
     >

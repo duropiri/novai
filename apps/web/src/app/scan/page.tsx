@@ -35,13 +35,14 @@ import {
   Sparkles,
   User,
   Users,
+  Smile,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { Slider } from '@/components/ui/slider';
+import { Switch } from '@/components/ui/switch';
+import { useToast } from '@/components/ui/use-toast';
 import {
   scanApi,
-  loraApi,
-  characterApi,
-  referenceKitApi,
   ScanSession,
   ScanCapture,
   ANGLE_DISPLAY_NAMES,
@@ -49,7 +50,7 @@ import {
 import { useScanSocket } from '@/lib/scan-socket';
 import { QRDisplay, LivePreview, AngleGrid, CaptureGallery } from '@/components/scan';
 
-type ExportTarget = 'lora' | 'character' | 'reference_kit' | null;
+type ExportTarget = 'lora' | 'character' | 'reference_kit' | 'emotion_board' | null;
 
 export default function ScanPage() {
   // Session state
@@ -61,11 +62,17 @@ export default function ScanPage() {
 
   // Connection state
   const [phoneConnected, setPhoneConnected] = useState(false);
-  const [currentFrame, setCurrentFrame] = useState<ArrayBuffer | null>(null);
+  const [currentFrame, setCurrentFrame] = useState<ArrayBuffer | Uint8Array | null>(null);
 
   // Export dialog
   const [exportTarget, setExportTarget] = useState<ExportTarget>(null);
   const [exporting, setExporting] = useState(false);
+  const [exportName, setExportName] = useState('');
+  const [exportTriggerWord, setExportTriggerWord] = useState('');
+  const [exportSteps, setExportSteps] = useState(1000);
+  const [exportLearningRate, setExportLearningRate] = useState(0.0007);
+  const [exportIsStyle, setExportIsStyle] = useState(false);
+  const { toast } = useToast();
 
   // Session history
   const [sessions, setSessions] = useState<ScanSession[]>([]);
@@ -152,10 +159,8 @@ export default function ScanPage() {
       setSessionName('');
 
       // Connect to WebSocket and subscribe
-      connect();
-
-      // Wait for connection then subscribe
-      setTimeout(async () => {
+      const connected = await connect();
+      if (connected) {
         const result = await subscribeToSession(
           newSession.id,
           newSession.session_secret
@@ -163,7 +168,7 @@ export default function ScanPage() {
         if (!result.success) {
           console.error('Failed to subscribe to session:', result.error);
         }
-      }, 500);
+      }
 
       await loadHistory();
     } catch (error) {
@@ -186,9 +191,8 @@ export default function ScanPage() {
       setCurrentFrame(null);
 
       // Connect to WebSocket and subscribe
-      connect();
-
-      setTimeout(async () => {
+      const connected = await connect();
+      if (connected) {
         const result = await subscribeToSession(
           sessionData.id,
           sessionData.session_secret
@@ -196,7 +200,7 @@ export default function ScanPage() {
         if (result.success && result.phoneConnected) {
           setPhoneConnected(true);
         }
-      }, 500);
+      }
     } catch (error) {
       console.error('Failed to resume session:', error);
     } finally {
@@ -287,33 +291,87 @@ export default function ScanPage() {
     return session.target_angles.find((angle) => !captured.has(angle));
   };
 
+  // Reset export form when dialog opens
+  const openExportDialog = (target: ExportTarget) => {
+    setExportTarget(target);
+    setExportName(session?.name || '');
+    setExportTriggerWord('');
+    setExportSteps(1000);
+    setExportLearningRate(0.0007);
+    setExportIsStyle(false);
+  };
+
   // Handle export
   const handleExport = async () => {
     if (!session || !exportTarget) return;
 
+    if (!exportName.trim()) {
+      toast({
+        title: 'Name required',
+        description: 'Please enter a name for the export',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    if (exportTarget === 'lora' && !exportTriggerWord.trim()) {
+      toast({
+        title: 'Trigger word required',
+        description: 'Please enter a trigger word for the LoRA model',
+        variant: 'destructive',
+      });
+      return;
+    }
+
     setExporting(true);
     try {
-      const selectedCaptures = await scanApi.getSelectedCaptures(session.id);
-      const imageUrls = selectedCaptures.map((c) => c.image_url);
+      let result: { jobId: string };
 
       switch (exportTarget) {
         case 'lora':
-          // TODO: Create LoRA with images
-          console.log('Export to LoRA:', imageUrls);
+          result = await scanApi.exportToLora(session.id, {
+            name: exportName,
+            triggerWord: exportTriggerWord,
+            steps: exportSteps,
+            learningRate: exportLearningRate,
+            isStyle: exportIsStyle,
+          });
+          toast({
+            title: 'LoRA training started',
+            description: `Training job started for "${exportName}". Check the LoRA page for progress.`,
+          });
           break;
         case 'character':
-          // TODO: Create Character Diagram with primary image
-          console.log('Export to Character:', imageUrls[0]);
+          result = await scanApi.exportToCharacter(session.id, { name: exportName });
+          toast({
+            title: 'Character diagram started',
+            description: `Creating character diagram "${exportName}". Check the Characters page for progress.`,
+          });
           break;
         case 'reference_kit':
-          // TODO: Create Reference Kit with images
-          console.log('Export to Reference Kit:', imageUrls);
+          result = await scanApi.exportToReferenceKit(session.id, { name: exportName });
+          toast({
+            title: 'Reference kit started',
+            description: `Creating reference kit "${exportName}". Check the Reference Kits page for progress.`,
+          });
+          break;
+        case 'emotion_board':
+          result = await scanApi.exportToEmotionBoard(session.id, { name: exportName });
+          toast({
+            title: 'Emotion board started',
+            description: `Creating emotion board "${exportName}". Check the Emotion Boards page for progress.`,
+          });
           break;
       }
 
       setExportTarget(null);
     } catch (error) {
       console.error('Failed to export:', error);
+      toast({
+        title: 'Export failed',
+        description: error instanceof Error ? error.message : 'Failed to start export',
+        variant: 'destructive',
+      });
     } finally {
       setExporting(false);
     }
@@ -364,6 +422,7 @@ export default function ScanPage() {
               sessionUrl={scanApi.getSessionUrl(session.session_code)}
               sessionCode={session.session_code}
               expiresAt={session.expires_at}
+              networkHost={scanApi.getDisplayUrl()}
               onRefresh={handleRefreshSession}
             />
 
@@ -419,7 +478,6 @@ export default function ScanPage() {
                   ? ANGLE_DISPLAY_NAMES[currentTargetAngle]
                   : undefined
               }
-              className="h-[400px]"
             />
 
             <CaptureGallery
@@ -432,34 +490,46 @@ export default function ScanPage() {
             {captures.length > 0 && (
               <Card>
                 <CardContent className="p-4">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
                     <span className="text-sm text-muted-foreground">
                       {captures.filter((c) => c.is_selected).length} captures selected
                     </span>
-                    <div className="flex gap-2">
+                    <div className="flex flex-wrap gap-2">
                       <Button
                         variant="outline"
-                        onClick={() => setExportTarget('lora')}
+                        size="sm"
+                        onClick={() => openExportDialog('lora')}
                         disabled={captures.filter((c) => c.is_selected).length < 5}
                       >
                         <Sparkles className="w-4 h-4 mr-2" />
-                        Create LoRA
+                        LoRA
                       </Button>
                       <Button
                         variant="outline"
-                        onClick={() => setExportTarget('character')}
+                        size="sm"
+                        onClick={() => openExportDialog('character')}
                         disabled={captures.filter((c) => c.is_selected).length === 0}
                       >
                         <User className="w-4 h-4 mr-2" />
-                        Create Character
+                        Character
                       </Button>
                       <Button
                         variant="outline"
-                        onClick={() => setExportTarget('reference_kit')}
-                        disabled={captures.filter((c) => c.is_selected).length === 0}
+                        size="sm"
+                        onClick={() => openExportDialog('reference_kit')}
+                        disabled={captures.filter((c) => c.is_selected).length < 3}
                       >
                         <Users className="w-4 h-4 mr-2" />
-                        Create Kit
+                        Ref Kit
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => openExportDialog('emotion_board')}
+                        disabled={captures.filter((c) => c.is_selected).length === 0}
+                      >
+                        <Smile className="w-4 h-4 mr-2" />
+                        Emotions
                       </Button>
                     </div>
                   </div>
@@ -602,44 +672,116 @@ export default function ScanPage() {
 
       {/* Export Dialog */}
       <Dialog open={!!exportTarget} onOpenChange={() => setExportTarget(null)}>
-        <DialogContent>
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>
-              Export to{' '}
               {exportTarget === 'lora'
-                ? 'LoRA Training'
+                ? 'Create LoRA Model'
                 : exportTarget === 'character'
-                  ? 'Character Diagram'
-                  : 'Reference Kit'}
+                  ? 'Create Character Diagram'
+                  : exportTarget === 'reference_kit'
+                    ? 'Create Reference Kit'
+                    : 'Create Emotion Board'}
             </DialogTitle>
             <DialogDescription>
               {exportTarget === 'lora'
-                ? 'Create a new LoRA model trained on your scanned images.'
+                ? 'Train a LoRA model on your scanned face images.'
                 : exportTarget === 'character'
-                  ? 'Create a character diagram from your best front-facing image.'
-                  : 'Create a reference kit with multiple angles for face swapping.'}
+                  ? 'Generate a character diagram from your scan.'
+                  : exportTarget === 'reference_kit'
+                    ? 'Create a reference kit with multiple angles.'
+                    : 'Generate an emotion board with various expressions.'}
             </DialogDescription>
           </DialogHeader>
 
-          <div className="py-4">
-            <p className="text-sm">
-              <strong>Selected captures:</strong>{' '}
-              {captures.filter((c) => c.is_selected).length}
-            </p>
+          <div className="space-y-4 py-4">
+            <div className="text-sm text-muted-foreground">
+              Using {captures.filter((c) => c.is_selected).length} selected captures
+            </div>
+
+            {/* Common: Name field */}
+            <div className="space-y-2">
+              <Label htmlFor="export-name">Name</Label>
+              <Input
+                id="export-name"
+                value={exportName}
+                onChange={(e) => setExportName(e.target.value)}
+                placeholder={
+                  exportTarget === 'lora'
+                    ? 'Model name'
+                    : exportTarget === 'character'
+                      ? 'Character name'
+                      : exportTarget === 'reference_kit'
+                        ? 'Kit name'
+                        : 'Board name'
+                }
+              />
+            </div>
+
+            {/* LoRA-specific fields */}
+            {exportTarget === 'lora' && (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="export-trigger">Trigger Word</Label>
+                  <Input
+                    id="export-trigger"
+                    value={exportTriggerWord}
+                    onChange={(e) => setExportTriggerWord(e.target.value)}
+                    placeholder="e.g., ohwx person"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Use this word in prompts to activate the model
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label>Training Steps</Label>
+                    <span className="text-sm text-muted-foreground">{exportSteps}</span>
+                  </div>
+                  <Slider
+                    value={[exportSteps]}
+                    onValueChange={([v]) => setExportSteps(v)}
+                    min={500}
+                    max={2000}
+                    step={100}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label>Style Training</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Train for style instead of face
+                    </p>
+                  </div>
+                  <Switch
+                    checked={exportIsStyle}
+                    onCheckedChange={setExportIsStyle}
+                  />
+                </div>
+              </>
+            )}
           </div>
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setExportTarget(null)}>
               Cancel
             </Button>
-            <Button onClick={handleExport} disabled={exporting}>
+            <Button onClick={handleExport} disabled={exporting || !exportName.trim()}>
               {exporting ? (
                 <>
                   <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                  Exporting...
+                  Creating...
                 </>
               ) : (
-                'Create'
+                <>
+                  {exportTarget === 'lora' && <Sparkles className="w-4 h-4 mr-2" />}
+                  {exportTarget === 'character' && <User className="w-4 h-4 mr-2" />}
+                  {exportTarget === 'reference_kit' && <Users className="w-4 h-4 mr-2" />}
+                  {exportTarget === 'emotion_board' && <Smile className="w-4 h-4 mr-2" />}
+                  Create
+                </>
               )}
             </Button>
           </DialogFooter>

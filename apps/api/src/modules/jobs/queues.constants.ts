@@ -5,7 +5,8 @@ export const QUEUES = {
   IMAGE_GENERATION: 'image-generation',
   VARIANT: 'variant',
   REFERENCE_KIT: 'reference-kit',
-  EMOTION_BOARD: 'emotion-board',
+  EXPRESSION_BOARD: 'expression-board',
+  SCAN_VIDEO: 'scan-video',
 } as const;
 
 export type QueueName = (typeof QUEUES)[keyof typeof QUEUES];

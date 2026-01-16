@@ -4,13 +4,14 @@ import { useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Copy, RefreshCw, Smartphone } from 'lucide-react';
+import { Copy, RefreshCw, Smartphone, Wifi } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface QRDisplayProps {
   sessionUrl: string;
   sessionCode: string;
   expiresAt: string;
+  networkHost?: string; // Display the network host for debugging
   onRefresh?: () => void;
   className?: string;
 }
@@ -19,6 +20,7 @@ export function QRDisplay({
   sessionUrl,
   sessionCode,
   expiresAt,
+  networkHost,
   onRefresh,
   className,
 }: QRDisplayProps) {
@@ -117,6 +119,14 @@ export function QRDisplay({
             </div>
             {copied && (
               <p className="text-xs text-green-600">Copied to clipboard!</p>
+            )}
+
+            {/* Network host info */}
+            {networkHost && (
+              <div className="flex items-center justify-center gap-1 text-xs text-muted-foreground mt-2">
+                <Wifi className="w-3 h-3" />
+                <span className="font-mono">{networkHost}</span>
+              </div>
             )}
 
             {/* Timer */}

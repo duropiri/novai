@@ -1,8 +1,7 @@
 'use client';
 
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import { useDropzone } from 'react-dropzone';
-import { Upload, Trash2, Loader2, CheckCircle, XCircle, Clock, FileUp, Check, X, Pencil, Terminal, ChevronDown, ChevronUp, StopCircle, RotateCcw, Info, Settings, ChevronLeft, ChevronRight, Images, Grid3X3 } from 'lucide-react';
+import { Upload, Trash2, Loader2, CheckCircle, XCircle, Clock, FileUp, Check, X, Pencil, Terminal, ChevronDown, ChevronUp, StopCircle, RotateCcw, Info, Settings } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -24,8 +23,8 @@ import { Switch } from '@/components/ui/switch';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { loraApi, filesApi, type LoraModel } from '@/lib/api';
-import { processFilesWithZipSupport } from '@/lib/zip-utils';
 import { FaceSelector, type FaceProcessingResult } from '@/components/face-selector';
+import { MultiImageUploader, type UploadedImage, type GoogleDriveZipResult } from '@/components/multi-image-uploader';
 import {
   analyzeAngleCoverage,
   getAngleDisplayName,
@@ -70,13 +69,8 @@ export default function LoraCreatorPage() {
   const [name, setName] = useState('');
   const [triggerWord, setTriggerWord] = useState('');
   const [steps, setSteps] = useState(1000);
-  const [files, setFiles] = useState<File[]>([]);
-  const [isProcessingZip, setIsProcessingZip] = useState(false);
-  const [isProcessingVideo, setIsProcessingVideo] = useState(false);
-  const [googleDriveUrl, setGoogleDriveUrl] = useState('');
-  const [googleDriveZipUrl, setGoogleDriveZipUrl] = useState<string | null>(null);
-  const [googleDriveImageCount, setGoogleDriveImageCount] = useState(0);
-  const [isImportingDrive, setIsImportingDrive] = useState(false);
+  const [images, setImages] = useState<UploadedImage[]>([]);
+  const [googleDriveZipResult, setGoogleDriveZipResult] = useState<GoogleDriveZipResult | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [loraModels, setLoraModels] = useState<LoraModel[]>([]);
@@ -130,14 +124,12 @@ export default function LoraCreatorPage() {
   const deletionTimersRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const DELETION_DELAY_MS = 5000; // 5 seconds to undo
 
-  // Image gallery state
-  const [galleryOpen, setGalleryOpen] = useState(false);
-  const [galleryIndex, setGalleryIndex] = useState(0);
-  const PREVIEW_LIMIT = 12; // Max images to show in grid preview
-
   // Face angle coverage analysis state
   const [angleCoverage, setAngleCoverage] = useState<AngleCoverageAnalysis | null>(null);
   const [isAnalyzingAngles, setIsAnalyzingAngles] = useState(false);
+
+  // Extract files from images for compatibility with existing logic
+  const files = useMemo(() => images.map(img => img.file), [images]);
 
   // Analyze face angles when files change
   useEffect(() => {
@@ -258,181 +250,6 @@ export default function LoraCreatorPage() {
     return () => clearInterval(interval);
   }, [fetchModels]);
 
-  const onDrop = useCallback(async (acceptedFiles: File[]) => {
-    // Separate videos from other files
-    const videoFiles = acceptedFiles.filter(f =>
-      f.type.startsWith('video/') || ['.mp4', '.mov', '.avi', '.webm'].some(ext => f.name.toLowerCase().endsWith(ext))
-    );
-    const otherFiles = acceptedFiles.filter(f =>
-      !f.type.startsWith('video/') && !['.mp4', '.mov', '.avi', '.webm'].some(ext => f.name.toLowerCase().endsWith(ext))
-    );
-
-    // Process non-video files (images and ZIPs)
-    if (otherFiles.length > 0) {
-      setIsProcessingZip(true);
-      try {
-        const imageFiles = await processFilesWithZipSupport(otherFiles);
-        setFiles((prev) => [...prev, ...imageFiles]);
-      } finally {
-        setIsProcessingZip(false);
-      }
-    }
-
-    // Process video files - extract frames via API
-    if (videoFiles.length > 0) {
-      setIsProcessingVideo(true);
-      toast({ title: 'Processing Videos', description: `Extracting frames from ${videoFiles.length} video(s)...` });
-
-      for (const video of videoFiles) {
-        try {
-          const formData = new FormData();
-          formData.append('video', video);
-
-          const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'}/files/extract-frames?maxFrames=50&targetFps=1`, {
-            method: 'POST',
-            body: formData,
-          });
-
-          if (!response.ok) {
-            throw new Error(`Failed to extract frames from ${video.name}`);
-          }
-
-          const data = await response.json();
-          const frameUrls: string[] = data.frames || [];
-
-          // Convert frame URLs to File objects by fetching them
-          const frameFiles: File[] = [];
-          for (let i = 0; i < frameUrls.length; i++) {
-            const frameResponse = await fetch(frameUrls[i]);
-            const blob = await frameResponse.blob();
-            const file = new File([blob], `${video.name}_frame_${i.toString().padStart(4, '0')}.png`, { type: 'image/png' });
-            frameFiles.push(file);
-          }
-
-          setFiles((prev) => [...prev, ...frameFiles]);
-          toast({ title: 'Frames Extracted', description: `Extracted ${frameFiles.length} frames from ${video.name}` });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Failed to process video';
-          toast({ title: 'Error', description: message, variant: 'destructive' });
-        }
-      }
-      setIsProcessingVideo(false);
-    }
-  }, [toast]);
-
-  // Import from Google Drive folder
-  // Uses server-side ZIP creation - no need to download files locally
-  const handleGoogleDriveImport = async () => {
-    if (!googleDriveUrl.trim()) {
-      toast({ title: 'Error', description: 'Please enter a Google Drive folder URL', variant: 'destructive' });
-      return;
-    }
-
-    setIsImportingDrive(true);
-    toast({ title: 'Importing', description: 'Importing files from Google Drive...' });
-
-    try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'}/files/import-gdrive`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          folderUrl: googleDriveUrl.trim(),
-          maxFramesPerVideo: 50,
-          createZip: true,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to import from Google Drive');
-      }
-
-      const data = await response.json();
-      const imageCount = data.count || 0;
-      const zipUrl = data.zipUrl;
-
-      if (!zipUrl) {
-        throw new Error('No images found in Google Drive folder');
-      }
-
-      // Store the ZIP URL directly - no need to download files locally
-      setGoogleDriveZipUrl(zipUrl);
-      setGoogleDriveImageCount(imageCount);
-      setGoogleDriveUrl('');
-      // Clear any local files to avoid confusion
-      setFiles([]);
-      toast({
-        title: 'Import Complete',
-        description: `Ready to train with ${imageCount} images from Google Drive`
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to import';
-      toast({ title: 'Error', description: message, variant: 'destructive' });
-    } finally {
-      setIsImportingDrive(false);
-    }
-  };
-
-  // Clear Google Drive import
-  const clearGoogleDriveImport = () => {
-    setGoogleDriveZipUrl(null);
-    setGoogleDriveImageCount(0);
-  };
-
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
-    accept: {
-      'image/*': ['.png', '.jpg', '.jpeg', '.webp'],
-      'application/zip': ['.zip'],
-      'application/x-zip-compressed': ['.zip'],
-      'video/*': ['.mp4', '.mov', '.avi', '.webm'],
-    },
-    multiple: true,
-    disabled: isProcessingZip || isProcessingVideo,
-  });
-
-  const removeFile = (index: number) => {
-    setFiles((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  // Memoized preview URLs - only create object URLs for visible images
-  const previewUrls = useMemo(() => {
-    const urls: string[] = [];
-    const limit = Math.min(files.length, PREVIEW_LIMIT);
-    for (let i = 0; i < limit; i++) {
-      urls.push(URL.createObjectURL(files[i]));
-    }
-    return urls;
-  }, [files, PREVIEW_LIMIT]);
-
-  // Cleanup preview URLs when files change
-  useEffect(() => {
-    return () => {
-      previewUrls.forEach((url) => URL.revokeObjectURL(url));
-    };
-  }, [previewUrls]);
-
-  // Gallery navigation
-  const openGallery = (index: number) => {
-    setGalleryIndex(index);
-    setGalleryOpen(true);
-  };
-
-  const nextImage = () => {
-    setGalleryIndex((prev) => (prev + 1) % files.length);
-  };
-
-  const prevImage = () => {
-    setGalleryIndex((prev) => (prev - 1 + files.length) % files.length);
-  };
-
-  // Get URL for gallery (create on demand for non-preview images)
-  const getGalleryUrl = useCallback((index: number) => {
-    if (index < previewUrls.length) {
-      return previewUrls[index];
-    }
-    return URL.createObjectURL(files[index]);
-  }, [files, previewUrls]);
-
   const createZipFromFiles = async (files: File[]): Promise<Blob> => {
     // Dynamic import for JSZip (we'll need to add this package)
     const JSZip = (await import('jszip')).default;
@@ -461,7 +278,7 @@ export default function LoraCreatorPage() {
 
     // Check for images: either local files OR Google Drive import
     const hasLocalFiles = files.length >= 3;
-    const hasGoogleDriveImport = googleDriveZipUrl && googleDriveImageCount >= 3;
+    const hasGoogleDriveImport = googleDriveZipResult && googleDriveZipResult.count >= 3;
 
     if (!hasLocalFiles && !hasGoogleDriveImport) {
       toast({
@@ -476,9 +293,9 @@ export default function LoraCreatorPage() {
       setIsCreating(true);
       let imagesZipUrl: string;
 
-      if (googleDriveZipUrl) {
+      if (googleDriveZipResult) {
         // Use the pre-created ZIP from Google Drive import directly
-        imagesZipUrl = googleDriveZipUrl;
+        imagesZipUrl = googleDriveZipResult.zipUrl;
         toast({ title: 'Starting', description: 'Using imported Google Drive images...' });
       } else {
         // Create ZIP file from local images
@@ -520,9 +337,8 @@ export default function LoraCreatorPage() {
       setName('');
       setTriggerWord('');
       setSteps(1000);
-      setFiles([]);
-      setGoogleDriveZipUrl(null);
-      setGoogleDriveImageCount(0);
+      setImages([]);
+      setGoogleDriveZipResult(null);
       setIsStyle(false);
       setLearningRate(0.0007);
       setIncludeSyntheticCaptions(false);
@@ -1188,230 +1004,101 @@ export default function LoraCreatorPage() {
                 </p>
               </div>
 
+              {/* Training Images - Using MultiImageUploader */}
               <div className="space-y-2">
                 <Label>
-                  Training Images ({googleDriveZipUrl ? googleDriveImageCount : files.length})
-                  {googleDriveZipUrl && (
+                  Training Images ({googleDriveZipResult ? googleDriveZipResult.count : files.length})
+                  {googleDriveZipResult && (
                     <Badge variant="secondary" className="ml-2 text-xs">Google Drive</Badge>
                   )}
                 </Label>
 
-                {/* Google Drive Import Success State */}
-                {googleDriveZipUrl ? (
-                  <div className="border-2 border-primary/50 bg-primary/5 rounded-lg p-6 text-center">
-                    <CheckCircle className="w-8 h-8 mx-auto mb-2 text-primary" />
-                    <p className="font-medium">{googleDriveImageCount} images from Google Drive</p>
-                    <p className="text-sm text-muted-foreground mt-1">
-                      Ready to start training
-                    </p>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="mt-3"
-                      onClick={clearGoogleDriveImport}
-                      disabled={isCreating}
-                    >
-                      <Trash2 className="w-4 h-4 mr-2" />
-                      Clear and upload different images
-                    </Button>
-                  </div>
-                ) : (
-                  <>
-                    <div
-                      {...getRootProps()}
-                      className={`border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors ${
-                        isDragActive
-                          ? 'border-primary bg-primary/5'
-                          : 'border-muted-foreground/25 hover:border-primary/50'
-                      } ${isCreating || isProcessingZip || isProcessingVideo ? 'pointer-events-none opacity-50' : ''}`}
-                    >
-                      <input {...getInputProps()} />
-                      {isProcessingZip ? (
-                        <>
-                          <Loader2 className="w-8 h-8 mx-auto mb-2 text-muted-foreground animate-spin" />
-                          <p className="text-muted-foreground">Extracting images from ZIP...</p>
-                        </>
-                      ) : isProcessingVideo ? (
-                        <>
-                          <Loader2 className="w-8 h-8 mx-auto mb-2 text-muted-foreground animate-spin" />
-                          <p className="text-muted-foreground">Extracting frames from video...</p>
-                        </>
-                      ) : (
-                        <>
-                          <Upload className="w-8 h-8 mx-auto mb-2 text-muted-foreground" />
-                          {isDragActive ? (
-                            <p>Drop the files here...</p>
-                          ) : (
-                            <p className="text-muted-foreground">
-                              Drag & drop images, videos, or ZIP files
-                            </p>
-                          )}
-                          <p className="text-xs text-muted-foreground mt-1">
-                            Images (PNG, JPG, WebP), Videos (MP4, MOV), or ZIP
-                          </p>
-                          <p className="text-xs text-muted-foreground">
-                            Videos will be frame-extracted automatically
-                          </p>
-                        </>
-                      )}
-                    </div>
-
-                    {/* Google Drive Import */}
-                    <div className="flex gap-2 mt-3">
-                      <Input
-                        placeholder="Google Drive folder URL..."
-                        value={googleDriveUrl}
-                        onChange={(e) => setGoogleDriveUrl(e.target.value)}
-                        disabled={isCreating || isImportingDrive}
-                        className="flex-1"
-                      />
-                      <Button
-                        type="button"
-                        variant="outline"
-                        onClick={handleGoogleDriveImport}
-                        disabled={isCreating || isImportingDrive || !googleDriveUrl.trim()}
-                      >
-                        {isImportingDrive ? (
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                        ) : (
-                          'Import'
-                        )}
-                      </Button>
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      Paste a Google Drive folder link (folder must be publicly shared)
-                    </p>
-                  </>
-                )}
+                <MultiImageUploader
+                  images={images}
+                  onChange={setImages}
+                  disabled={isCreating}
+                  minImages={3}
+                  maxImages={200}
+                  enableVideo={true}
+                  enableGoogleDrive={true}
+                  googleDriveZipMode={true}
+                  googleDriveZipResult={googleDriveZipResult}
+                  onGoogleDriveZip={setGoogleDriveZipResult}
+                  showPrimary={false}
+                  showGallery={true}
+                  previewLimit={12}
+                  dropzoneLabel="Drag & drop images, videos, or ZIP files"
+                  dropzoneSublabel="Images (PNG, JPG, WebP), Videos (MP4, MOV), or ZIP. Videos will be frame-extracted automatically."
+                />
               </div>
 
-              {files.length > 0 && (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <Label>Selected Images ({files.length})</Label>
-                    {files.length > PREVIEW_LIMIT && (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => openGallery(0)}
-                        className="text-xs"
-                      >
-                        <Grid3X3 className="w-3 h-3 mr-1" />
-                        View All
-                      </Button>
-                    )}
-                  </div>
-                  <div className="grid grid-cols-4 gap-2">
-                    {previewUrls.map((url, index) => (
-                      <div key={index} className="relative group">
-                        <button
-                          type="button"
-                          onClick={() => openGallery(index)}
-                          className="w-full focus:outline-none focus:ring-2 focus:ring-primary rounded"
-                        >
-                          <img
-                            src={url}
-                            alt={files[index]?.name || `Image ${index + 1}`}
-                            className="w-full h-20 object-cover rounded"
-                          />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            removeFile(index);
-                          }}
-                          className="absolute top-1 right-1 p-1 bg-destructive text-destructive-foreground rounded opacity-0 group-hover:opacity-100 transition-opacity"
-                          disabled={isCreating}
-                        >
-                          <Trash2 className="w-3 h-3" />
-                        </button>
-                      </div>
-                    ))}
-                    {/* Show "+X more" indicator */}
-                    {files.length > PREVIEW_LIMIT && (
-                      <button
-                        type="button"
-                        onClick={() => openGallery(PREVIEW_LIMIT)}
-                        className="w-full h-20 bg-muted rounded flex flex-col items-center justify-center text-muted-foreground hover:bg-muted/80 transition-colors"
-                      >
-                        <Images className="w-5 h-5 mb-1" />
-                        <span className="text-xs font-medium">+{files.length - PREVIEW_LIMIT} more</span>
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Face Angle Coverage Analysis */}
-                  {!isStyle && (
-                    <div className="mt-3 p-3 bg-muted/50 rounded-lg">
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium">Angle Coverage</span>
-                          {isAnalyzingAngles && (
-                            <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
-                          )}
-                        </div>
-                        {angleCoverage && (
-                          <Badge
-                            variant={angleCoverage.score >= 70 ? 'default' : angleCoverage.score >= 40 ? 'secondary' : 'destructive'}
-                            className="text-xs"
-                          >
-                            {angleCoverage.score}% Coverage
-                          </Badge>
-                        )}
-                      </div>
-
-                      {angleCoverage ? (
-                        <div className="space-y-2">
-                          {/* Coverage Bars */}
-                          <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
-                            {(['front', 'three_quarter_left', 'three_quarter_right', 'profile_left', 'profile_right'] as FaceAngle[]).map((angle) => {
-                              const count = angleCoverage.coverage[angle];
-                              const maxCount = 4;
-                              const percentage = Math.min(100, (count / maxCount) * 100);
-                              const isGood = count >= (angle === 'front' ? 2 : 1);
-
-                              return (
-                                <div key={angle} className="flex items-center gap-2">
-                                  <span className="w-16 text-muted-foreground truncate">
-                                    {getAngleDisplayName(angle)}
-                                  </span>
-                                  <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
-                                    <div
-                                      className={`h-full rounded-full transition-all ${
-                                        isGood ? 'bg-green-500' : count > 0 ? 'bg-yellow-500' : 'bg-red-500/50'
-                                      }`}
-                                      style={{ width: `${percentage}%` }}
-                                    />
-                                  </div>
-                                  <span className={`w-4 text-right ${isGood ? 'text-green-600' : count > 0 ? 'text-yellow-600' : 'text-muted-foreground'}`}>
-                                    {count}
-                                  </span>
-                                </div>
-                              );
-                            })}
-                          </div>
-
-                          {/* Recommendations */}
-                          {angleCoverage.recommendations.length > 0 && (
-                            <div className="pt-2 border-t border-border/50 space-y-1">
-                              {angleCoverage.recommendations.map((rec, idx) => (
-                                <div key={idx} className="flex items-start gap-1.5 text-xs text-yellow-600 dark:text-yellow-500">
-                                  <Info className="w-3 h-3 mt-0.5 flex-shrink-0" />
-                                  <span>{rec}</span>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        <p className="text-xs text-muted-foreground">
-                          {isAnalyzingAngles ? 'Analyzing face angles...' : 'Add images to analyze angle coverage'}
-                        </p>
+              {/* Face Angle Coverage Analysis */}
+              {!isStyle && files.length > 0 && (
+                <div className="p-3 bg-muted/50 rounded-lg">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium">Angle Coverage</span>
+                      {isAnalyzingAngles && (
+                        <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
                       )}
                     </div>
+                    {angleCoverage && (
+                      <Badge
+                        variant={angleCoverage.score >= 70 ? 'default' : angleCoverage.score >= 40 ? 'secondary' : 'destructive'}
+                        className="text-xs"
+                      >
+                        {angleCoverage.score}% Coverage
+                      </Badge>
+                    )}
+                  </div>
+
+                  {angleCoverage ? (
+                    <div className="space-y-2">
+                      {/* Coverage Bars */}
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+                        {(['front', 'three_quarter_left', 'three_quarter_right', 'profile_left', 'profile_right'] as FaceAngle[]).map((angle) => {
+                          const count = angleCoverage.coverage[angle];
+                          const maxCount = 4;
+                          const percentage = Math.min(100, (count / maxCount) * 100);
+                          const isGood = count >= (angle === 'front' ? 2 : 1);
+
+                          return (
+                            <div key={angle} className="flex items-center gap-2">
+                              <span className="w-16 text-muted-foreground truncate">
+                                {getAngleDisplayName(angle)}
+                              </span>
+                              <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full transition-all ${
+                                    isGood ? 'bg-green-500' : count > 0 ? 'bg-yellow-500' : 'bg-red-500/50'
+                                  }`}
+                                  style={{ width: `${percentage}%` }}
+                                />
+                              </div>
+                              <span className={`w-4 text-right ${isGood ? 'text-green-600' : count > 0 ? 'text-yellow-600' : 'text-muted-foreground'}`}>
+                                {count}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Recommendations */}
+                      {angleCoverage.recommendations.length > 0 && (
+                        <div className="pt-2 border-t border-border/50 space-y-1">
+                          {angleCoverage.recommendations.map((rec, idx) => (
+                            <div key={idx} className="flex items-start gap-1.5 text-xs text-yellow-600 dark:text-yellow-500">
+                              <Info className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                              <span>{rec}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      {isAnalyzingAngles ? 'Analyzing face angles...' : 'Add images to analyze angle coverage'}
+                    </p>
                   )}
                 </div>
               )}
@@ -1697,36 +1384,10 @@ export default function LoraCreatorPage() {
                             onClick={() => undoDelete(model.id)}
                             className="text-xs"
                           >
-                            <RotateCcw className="w-3 h-3 mr-1" />
                             Undo
                           </Button>
                         ) : (
                           <>
-                            {/* Cancel button for training/pending */}
-                            {(model.status === 'training' || model.status === 'pending') && (
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => handleCancel(model.id, model.name)}
-                                title="Cancel training"
-                                className="text-destructive hover:text-destructive"
-                              >
-                                <StopCircle className="w-4 h-4" />
-                              </Button>
-                            )}
-                            {/* Retry button for failed */}
-                            {model.status === 'failed' && model.training_images_url && (
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => handleRetry(model.id, model.name)}
-                                title="Retry training"
-                                className="text-blue-600 hover:text-blue-700"
-                              >
-                                <RotateCcw className="w-4 h-4" />
-                              </Button>
-                            )}
-                            {/* Edit button for ready */}
                             {model.status === 'ready' && (
                               <Button
                                 variant="ghost"
@@ -1737,7 +1398,26 @@ export default function LoraCreatorPage() {
                                 <Pencil className="w-4 h-4" />
                               </Button>
                             )}
-                            {/* Delete button for ready/failed */}
+                            {(model.status === 'pending' || model.status === 'training') && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleCancel(model.id, model.name)}
+                                title="Cancel"
+                              >
+                                <StopCircle className="w-4 h-4" />
+                              </Button>
+                            )}
+                            {model.status === 'failed' && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleRetry(model.id, model.name)}
+                                title="Retry"
+                              >
+                                <RotateCcw className="w-4 h-4" />
+                              </Button>
+                            )}
                             {(model.status === 'ready' || model.status === 'failed') && (
                               <Button
                                 variant="ghost"
@@ -1752,57 +1432,8 @@ export default function LoraCreatorPage() {
                         )}
                       </div>
                     </div>
-                    {/* Inline Training Log for active models */}
-                    {(model.status === 'training' || model.status === 'pending') && (
-                      <div className="px-3 pb-3">
-                        <div className="pt-3 border-t">
-                          <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground mb-2">
-                            <Terminal className="w-3 h-3" />
-                            Training Log
-                          </div>
-                          <div className="bg-muted/50 rounded p-2 max-h-32 overflow-y-auto font-mono text-xs space-y-1">
-                            {trainingLog
-                              .filter(entry => entry.id === model.id)
-                              .slice(-10)
-                              .map((entry, idx) => (
-                                <div
-                                  key={`${entry.id}-${idx}`}
-                                  className={`flex items-start gap-2 ${
-                                    entry.status === 'failed' ? 'text-destructive' :
-                                    entry.status === 'ready' ? 'text-green-600 dark:text-green-400' :
-                                    'text-muted-foreground'
-                                  }`}
-                                >
-                                  <span className="shrink-0">
-                                    [{new Date(entry.timestamp).toLocaleTimeString()}]
-                                  </span>
-                                  <span className="flex-1">
-                                    {entry.status === 'training' && (
-                                      <span className="text-blue-600 dark:text-blue-400">
-                                        [{entry.progress}%] {entry.statusMessage}
-                                      </span>
-                                    )}
-                                    {entry.status === 'pending' && (
-                                      <span className="text-yellow-600 dark:text-yellow-400">
-                                        {entry.statusMessage}
-                                      </span>
-                                    )}
-                                  </span>
-                                </div>
-                              ))
-                            }
-                            {trainingLog.filter(entry => entry.id === model.id).length === 0 && model.status_message && (
-                              <div className="text-muted-foreground">
-                                {model.status === 'training' && `[${model.progress ?? 0}%] `}
-                                {model.status_message}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    )}
                   </div>
-                  );
+                );
                 })}
               </div>
             )}
@@ -1810,13 +1441,13 @@ export default function LoraCreatorPage() {
         </Card>
       </div>
 
-      {/* Edit Modal */}
+      {/* Rename Modal */}
       <Dialog open={renameModalOpen} onOpenChange={setRenameModalOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Edit LoRA Model</DialogTitle>
+            <DialogTitle>Edit LoRA</DialogTitle>
             <DialogDescription>
-              Update the name, trigger word, or thumbnail for this model
+              Update name, trigger word, or thumbnail
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleRenameSubmit} className="space-y-4">
@@ -1841,27 +1472,7 @@ export default function LoraCreatorPage() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="renameThumbnail">Thumbnail</Label>
-              {renameModel?.thumbnail_url && !renameThumbnail && (
-                <div className="mb-2">
-                  <img
-                    src={renameModel.thumbnail_url}
-                    alt="Current thumbnail"
-                    className="w-16 h-16 object-cover rounded"
-                  />
-                  <p className="text-xs text-muted-foreground mt-1">Current thumbnail</p>
-                </div>
-              )}
-              {renameThumbnail && (
-                <div className="mb-2">
-                  <img
-                    src={URL.createObjectURL(renameThumbnail)}
-                    alt="New thumbnail"
-                    className="w-16 h-16 object-cover rounded"
-                  />
-                  <p className="text-xs text-muted-foreground mt-1">New thumbnail</p>
-                </div>
-              )}
+              <Label htmlFor="renameThumbnail">New Thumbnail (optional)</Label>
               <Input
                 id="renameThumbnail"
                 type="file"
@@ -1869,94 +1480,29 @@ export default function LoraCreatorPage() {
                 onChange={(e) => setRenameThumbnail(e.target.files?.[0] || null)}
                 disabled={isRenaming}
               />
+              {renameModel?.thumbnail_url && !renameThumbnail && (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <img
+                    src={renameModel.thumbnail_url}
+                    alt="Current thumbnail"
+                    className="w-8 h-8 rounded object-cover"
+                  />
+                  <span>Current thumbnail</span>
+                </div>
+              )}
             </div>
 
-            <div className="flex justify-end gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setRenameModalOpen(false)}
-                disabled={isRenaming}
-              >
-                Cancel
-              </Button>
-              <Button type="submit" disabled={isRenaming}>
-                {isRenaming ? (
-                  <>
-                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    Saving...
-                  </>
-                ) : (
-                  'Save Changes'
-                )}
-              </Button>
-            </div>
+            <Button type="submit" className="w-full" disabled={isRenaming}>
+              {isRenaming ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Saving...
+                </>
+              ) : (
+                'Save Changes'
+              )}
+            </Button>
           </form>
-        </DialogContent>
-      </Dialog>
-
-      {/* Image Gallery Modal */}
-      <Dialog open={galleryOpen} onOpenChange={setGalleryOpen}>
-        <DialogContent className="max-w-4xl h-[80vh] p-0 gap-0">
-          <DialogHeader className="p-4 pb-2">
-            <DialogTitle className="flex items-center justify-between">
-              <span>Training Images</span>
-              <span className="text-sm font-normal text-muted-foreground">
-                {galleryIndex + 1} of {files.length}
-              </span>
-            </DialogTitle>
-          </DialogHeader>
-          <div className="flex-1 flex items-center justify-center bg-muted/30 relative overflow-hidden">
-            {files.length > 0 && (
-              <>
-                <img
-                  src={getGalleryUrl(galleryIndex)}
-                  alt={files[galleryIndex]?.name || `Image ${galleryIndex + 1}`}
-                  className="max-w-full max-h-full object-contain"
-                />
-                {/* Navigation buttons */}
-                <Button
-                  variant="secondary"
-                  size="icon"
-                  className="absolute left-4 top-1/2 -translate-y-1/2"
-                  onClick={prevImage}
-                >
-                  <ChevronLeft className="w-5 h-5" />
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="icon"
-                  className="absolute right-4 top-1/2 -translate-y-1/2"
-                  onClick={nextImage}
-                >
-                  <ChevronRight className="w-5 h-5" />
-                </Button>
-              </>
-            )}
-          </div>
-          <div className="p-4 pt-2 border-t">
-            <div className="flex items-center justify-between">
-              <div className="text-sm text-muted-foreground truncate max-w-[300px]">
-                {files[galleryIndex]?.name || `Image ${galleryIndex + 1}`}
-              </div>
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={() => {
-                  removeFile(galleryIndex);
-                  if (galleryIndex >= files.length - 1 && galleryIndex > 0) {
-                    setGalleryIndex(galleryIndex - 1);
-                  }
-                  if (files.length <= 1) {
-                    setGalleryOpen(false);
-                  }
-                }}
-              >
-                <Trash2 className="w-4 h-4 mr-2" />
-                Remove
-              </Button>
-            </div>
-          </div>
         </DialogContent>
       </Dialog>
     </div>

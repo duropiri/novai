@@ -158,6 +158,28 @@ export interface DbReferenceKit {
   updated_at: string;
 }
 
+export interface DbExpressionBoard {
+  id: string;
+  name: string | null;
+  status: 'pending' | 'generating' | 'ready' | 'failed';
+  source_type: 'image' | 'lora' | 'video' | 'zip' | 'character' | 'reference_kit';
+  source_image_url: string | null;
+  lora_id: string | null;
+  character_diagram_id: string | null;
+  reference_kit_id: string | null;
+  grid_size: '2x4' | '2x8' | '4x8' | '5x8';
+  board_types: string[];
+  expressions: string[];
+  subject_profile: Record<string, string> | null;
+  board_url: string | null;
+  cell_urls: Record<string, string> | null;
+  progress: number;
+  error_message: string | null;
+  cost_cents: number | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
 // ============================================
 // IDENTITY PROFILE TYPES (migration 00013)
 // ============================================
@@ -1104,6 +1126,38 @@ export class SupabaseService implements OnModuleInit {
       .eq('id', id);
 
     if (error) throw new Error(`Failed to delete reference kit: ${error.message}`);
+  }
+
+  // ============================================
+  // DATABASE OPERATIONS - EXPRESSION BOARDS
+  // ============================================
+
+  async getExpressionBoard(id: string): Promise<DbExpressionBoard | null> {
+    const { data, error } = await this.client
+      .from('expression_boards')
+      .select()
+      .eq('id', id)
+      .single();
+
+    if (error && error.code !== 'PGRST116') {
+      throw new Error(`Failed to get expression board: ${error.message}`);
+    }
+    return data;
+  }
+
+  async listExpressionBoards(status?: string): Promise<DbExpressionBoard[]> {
+    let query = this.client
+      .from('expression_boards')
+      .select()
+      .order('created_at', { ascending: false });
+
+    if (status) {
+      query = query.eq('status', status);
+    }
+
+    const { data, error } = await query;
+    if (error) throw new Error(`Failed to list expression boards: ${error.message}`);
+    return data || [];
   }
 
   // ============================================

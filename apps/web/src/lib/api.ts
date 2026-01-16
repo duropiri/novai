@@ -763,14 +763,17 @@ export interface ImageGenerationResult {
   jobId: string;
   loraId?: string;
   characterDiagramId?: string;
+  referenceKitId?: string;
+  expressionBoardId?: string;
   estimatedCostCents: number;
-  mode: 'text-to-image' | 'face-swap' | 'character-diagram-swap';
+  mode: 'text-to-image' | 'face-swap' | 'character-diagram-swap' | 'reference-kit-swap' | 'expression-board-swap';
 }
 
 export interface CreateImageGenerationRequest {
   loraId?: string;
   characterDiagramId?: string;
   referenceKitId?: string;
+  expressionBoardId?: string;
   prompt?: string;
   sourceImageUrl?: string;
   aspectRatio?: '1:1' | '16:9' | '9:16' | '4:5' | '3:4';
@@ -1114,9 +1117,40 @@ export const referenceKitApi = {
     }),
 };
 
-// ==================== Emotion Board API ====================
+// ==================== Expression Board API ====================
 
-export interface EmotionBoard {
+export type BoardType = 'emotion' | 'playful' | 'glamour' | 'casual' | 'angles';
+
+export const BOARD_TYPES: BoardType[] = ['emotion', 'playful', 'glamour', 'casual', 'angles'];
+
+export const BOARD_TYPE_LABELS: Record<BoardType, string> = {
+  emotion: 'Emotion',
+  playful: 'Playful',
+  glamour: 'Glamour',
+  casual: 'Casual',
+  angles: '3D Angles',
+};
+
+export const BOARD_EXPRESSIONS: Record<BoardType, string[]> = {
+  emotion: ['Happy', 'Sad', 'Angry', 'Surprised', 'Fearful', 'Disgusted', 'Neutral', 'Contempt'],
+  playful: ['Winking', 'Smirking', 'Tongue Out', 'Blowing Kiss', 'Giggling', 'Teasing', 'Cheeky', 'Mischievous'],
+  glamour: ['Sultry Gaze', 'Raised Eyebrow', 'Mysterious Smile', 'Side Glance', 'Pouting', 'Alluring', 'Intense', 'Dreamy'],
+  casual: ['Laughing', 'Thinking', 'Curious', 'Excited', 'Bored', 'Sleepy', 'Confused', 'Hopeful'],
+  angles: ['Front Neutral', 'Front Smile', '3/4 Left', '3/4 Right', 'Profile Left', 'Profile Right', 'Looking Up', 'Looking Down'],
+};
+
+export interface SubjectProfile {
+  hairColor: string;
+  hairStyle: string;
+  eyeColor: string;
+  skinTone: string;
+  faceShape: string;
+  distinguishing: string;
+  gender: string;
+  ageDesc: string;
+}
+
+export interface ExpressionBoard {
   id: string;
   name: string | null;
   status: 'pending' | 'generating' | 'ready' | 'failed';
@@ -1125,8 +1159,10 @@ export interface EmotionBoard {
   lora_id: string | null;
   character_diagram_id: string | null;
   reference_kit_id: string | null;
-  grid_size: '2x4' | '2x8';
-  emotions: string[];
+  grid_size: '2x4' | '2x8' | '4x8' | '5x8';
+  board_types: BoardType[];
+  expressions: string[];
+  subject_profile: SubjectProfile | null;
   board_url: string | null;
   cell_urls: Record<string, string> | null;
   progress: number;
@@ -1136,62 +1172,58 @@ export interface EmotionBoard {
   completed_at: string | null;
 }
 
-export interface CreateEmotionBoardRequest {
+export interface CreateExpressionBoardRequest {
   name?: string;
   sourceType: 'image' | 'lora' | 'video' | 'zip' | 'character' | 'reference_kit';
   sourceImageUrl?: string;
   loraId?: string;
   characterDiagramId?: string;
   referenceKitId?: string;
-  gridSize?: '2x4' | '2x8';
-  emotions?: string[];
+  boardTypes?: BoardType[];
 }
 
-export interface EmotionBoardResult {
+export interface ExpressionBoardResult {
   id: string;
   status: string;
   estimatedCost: number;
+  totalExpressions: number;
 }
 
-// Standard 8 emotions for 2x4 grid
-export const STANDARD_EMOTIONS = [
-  'Happy', 'Sad',
-  'Angry', 'Surprised',
-  'Disgusted', 'Fearful',
-  'Neutral', 'Contempt',
-];
+// Legacy exports for backwards compatibility
+export type EmotionBoard = ExpressionBoard;
+export const STANDARD_EMOTIONS = BOARD_EXPRESSIONS.emotion;
+export const EXTENDED_EMOTIONS = [...BOARD_EXPRESSIONS.emotion, ...BOARD_EXPRESSIONS.casual];
 
-// Extended 16 emotions for 2x8 grid
-export const EXTENDED_EMOTIONS = [
-  ...STANDARD_EMOTIONS,
-  'Excited', 'Confused',
-  'Proud', 'Embarrassed',
-  'Hopeful', 'Bored',
-  'Amused', 'Thoughtful',
-];
+export const expressionBoardApi = {
+  list: () => fetchApiSilent<ExpressionBoard[]>('/expression-board', []),
 
-export const emotionBoardApi = {
-  list: () => fetchApiSilent<EmotionBoard[]>('/emotion-board', []),
+  get: (id: string) => fetchApi<ExpressionBoard>(`/expression-board/${id}`),
 
-  get: (id: string) => fetchApi<EmotionBoard>(`/emotion-board/${id}`),
-
-  getEmotions: () =>
-    fetchApiSilent<{ standard: string[]; extended: string[] }>('/emotion-board/emotions', {
-      standard: STANDARD_EMOTIONS,
-      extended: EXTENDED_EMOTIONS,
+  getBoardTypes: () =>
+    fetchApiSilent<{ types: BoardType[]; expressions: Record<BoardType, string[]> }>('/expression-board/board-types', {
+      types: BOARD_TYPES,
+      expressions: BOARD_EXPRESSIONS,
     }),
 
-  create: (data: CreateEmotionBoardRequest) =>
-    fetchApi<EmotionBoardResult>('/emotion-board', {
+  create: (data: CreateExpressionBoardRequest) =>
+    fetchApi<ExpressionBoardResult>('/expression-board', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
 
   delete: (id: string) =>
-    fetchApi<void>(`/emotion-board/${id}`, {
+    fetchApi<void>(`/expression-board/${id}`, {
       method: 'DELETE',
     }),
+
+  cancel: (id: string) =>
+    fetchApi<void>(`/expression-board/${id}/cancel`, {
+      method: 'POST',
+    }),
 };
+
+// Legacy alias
+export const emotionBoardApi = expressionBoardApi;
 
 // ==================== Phone Scan API ====================
 
@@ -1318,15 +1350,115 @@ export const scanApi = {
   getSelectedCaptures: (sessionId: string) =>
     fetchApi<ScanCapture[]>(`/scan/sessions/${sessionId}/selected`),
 
+  // Upload video recording for processing
+  uploadScanVideo: (sessionId: string, videoBase64: string, verificationNumbers: string[]) =>
+    fetchApi<{ success: boolean; jobId: string }>(`/scan/sessions/${sessionId}/video`, {
+      method: 'POST',
+      body: JSON.stringify({ videoBase64, verificationNumbers }),
+    }),
+
+  // Export to LoRA training
+  exportToLora: (sessionId: string, data: { name: string; triggerWord: string; steps?: number; learningRate?: number; isStyle?: boolean }) =>
+    fetchApi<{ loraId: string; jobId: string }>(`/scan/sessions/${sessionId}/export/lora`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  // Export to Character Diagram
+  exportToCharacter: (sessionId: string, data: { name: string }) =>
+    fetchApi<{ characterId: string; jobId: string }>(`/scan/sessions/${sessionId}/export/character`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  // Export to Reference Kit
+  exportToReferenceKit: (sessionId: string, data: { name: string }) =>
+    fetchApi<{ kitId: string; jobId: string }>(`/scan/sessions/${sessionId}/export/reference-kit`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  // Export to Emotion Board
+  exportToEmotionBoard: (sessionId: string, data: { name: string }) =>
+    fetchApi<{ boardId: string; jobId: string }>(`/scan/sessions/${sessionId}/export/emotion-board`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
   // Helper to generate QR code URL for a session
+  // Uses ngrok URL or local network IP for development so phone can connect
   getSessionUrl: (sessionCode: string) => {
-    const baseUrl = typeof window !== 'undefined' ? window.location.origin : '';
-    return `${baseUrl}/scan/mobile?code=${sessionCode}`;
+    if (typeof window === 'undefined') return '';
+
+    // Check for ngrok URL override (for HTTPS camera access)
+    const ngrokUrl = process.env.NEXT_PUBLIC_NGROK_URL;
+    if (ngrokUrl) {
+      return `${ngrokUrl}/scan/mobile?code=${sessionCode}`;
+    }
+
+    // Check for explicit local IP override (for development)
+    const localIp = process.env.NEXT_PUBLIC_LOCAL_IP;
+    if (localIp) {
+      const protocol = window.location.protocol;
+      const port = window.location.port;
+      return `${protocol}//${localIp}${port ? `:${port}` : ''}/scan/mobile?code=${sessionCode}`;
+    }
+
+    // Use current origin (works if accessing via IP already)
+    return `${window.location.origin}/scan/mobile?code=${sessionCode}`;
   },
 
-  // Helper to get WebSocket URL
+  // Get the display URL for the QR code (shows what the phone will connect to)
+  getDisplayUrl: () => {
+    if (typeof window === 'undefined') return '';
+
+    const ngrokUrl = process.env.NEXT_PUBLIC_NGROK_URL;
+    if (ngrokUrl) {
+      return ngrokUrl;
+    }
+
+    const localIp = process.env.NEXT_PUBLIC_LOCAL_IP;
+    if (localIp) {
+      const protocol = window.location.protocol;
+      const port = window.location.port;
+      return `${protocol}//${localIp}${port ? `:${port}` : ''}`;
+    }
+    return window.location.origin;
+  },
+
+  // Helper to get WebSocket URL (uses same host as the page)
   getWebSocketUrl: () => {
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+    if (typeof window === 'undefined') {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+      return apiUrl.replace('http://', 'ws://').replace('https://', 'wss://');
+    }
+
+    // Check if we're accessing via ngrok (HTTPS on non-localhost)
+    const isNgrok = window.location.protocol === 'https:' &&
+                    !window.location.hostname.includes('localhost');
+
+    // If ngrok, use the ngrok API URL if available
+    if (isNgrok) {
+      const ngrokApiUrl = process.env.NEXT_PUBLIC_NGROK_API_URL;
+      if (ngrokApiUrl) {
+        return ngrokApiUrl.replace('https://', 'wss://').replace('http://', 'ws://');
+      }
+      // Fall back to trying WSS on current origin (won't work but shows clear error)
+      console.warn('No NEXT_PUBLIC_NGROK_API_URL configured for ngrok WebSocket');
+    }
+
+    // For local development, WebSocket connects to API server
+    // Use local IP if available, otherwise use API URL
+    const localIp = process.env.NEXT_PUBLIC_LOCAL_IP;
+    const apiPort = '3001'; // API server port
+
+    if (localIp) {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      return `${protocol}//${localIp}:${apiPort}`;
+    }
+
+    // Fall back to configured API URL
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || `http://${window.location.hostname}:3001`;
     return apiUrl.replace('http://', 'ws://').replace('https://', 'wss://');
   },
 };

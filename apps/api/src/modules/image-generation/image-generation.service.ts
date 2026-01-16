@@ -9,6 +9,7 @@ export interface CreateImageGenerationDto {
   loraId?: string;
   characterDiagramId?: string;
   referenceKitId?: string;
+  expressionBoardId?: string;
   prompt?: string;
   sourceImageUrl?: string;
   aspectRatio?: '1:1' | '16:9' | '9:16' | '4:5' | '3:4';
@@ -22,8 +23,9 @@ export interface ImageGenerationResult {
   loraId?: string;
   characterDiagramId?: string;
   referenceKitId?: string;
+  expressionBoardId?: string;
   estimatedCostCents: number;
-  mode: 'text-to-image' | 'face-swap' | 'character-diagram-swap' | 'reference-kit-swap';
+  mode: 'text-to-image' | 'face-swap' | 'character-diagram-swap' | 'reference-kit-swap' | 'expression-board-swap';
 }
 
 export interface GeneratedImage {
@@ -44,11 +46,51 @@ export class ImageGenerationService {
 
   async createImageGeneration(dto: CreateImageGenerationDto): Promise<ImageGenerationResult> {
     // Determine mode based on identity source
-    let mode: 'text-to-image' | 'face-swap' | 'character-diagram-swap' | 'reference-kit-swap';
+    let mode: 'text-to-image' | 'face-swap' | 'character-diagram-swap' | 'reference-kit-swap' | 'expression-board-swap';
     let referenceId: string;
     let jobPayload: Record<string, unknown>;
 
-    if (dto.referenceKitId) {
+    if (dto.expressionBoardId) {
+      // Expression Board mode - uses labeled expression images as reference faces
+      const board = await this.supabase.getExpressionBoard(dto.expressionBoardId);
+      if (!board) {
+        throw new Error('Expression Board not found');
+      }
+      if (board.status !== 'ready' || !board.cell_urls) {
+        throw new Error('Expression Board is not ready');
+      }
+
+      // Find the best reference face from cell_urls
+      // Prefer "Front Neutral" for angles board, or "Neutral" for emotion board
+      const cellUrls = board.cell_urls as Record<string, string>;
+      const anchorFaceUrl =
+        cellUrls['Front Neutral'] ||
+        cellUrls['Neutral'] ||
+        cellUrls['Happy'] ||
+        Object.values(cellUrls)[0];
+
+      if (!anchorFaceUrl) {
+        throw new Error('Expression Board has no usable reference images');
+      }
+
+      // Collect all cell URLs as reference images
+      const referenceUrls = Object.values(cellUrls).filter(Boolean) as string[];
+
+      mode = 'expression-board-swap';
+      referenceId = dto.expressionBoardId;
+      jobPayload = {
+        expressionBoardId: dto.expressionBoardId,
+        anchorFaceUrl,
+        referenceUrls,
+        expressionLabels: Object.keys(cellUrls),
+        prompt: dto.prompt,
+        sourceImageUrl: dto.sourceImageUrl,
+        aspectRatio: dto.aspectRatio,
+        numImages: dto.numImages,
+        imageStrength: dto.imageStrength,
+        mode,
+      };
+    } else if (dto.referenceKitId) {
       // Reference Kit mode - uses multiple reference images for identity preservation
       const kit = await this.supabase.getReferenceKit(dto.referenceKitId);
       if (!kit) {
@@ -174,6 +216,7 @@ export class ImageGenerationService {
       loraId: dto.loraId,
       characterDiagramId: dto.characterDiagramId,
       referenceKitId: dto.referenceKitId,
+      expressionBoardId: dto.expressionBoardId,
       estimatedCostCents,
       mode,
     };

@@ -1,6 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { GoogleGenAI } from '@google/genai';
+import { withRetry } from '../utils/retry';
+import { RateLimiter } from '../utils/rate-limiter';
 
 // ============================================
 // INTERFACES
@@ -134,6 +136,12 @@ export class IdentityAnalysisService {
   private readonly model = 'gemini-2.0-flash'; // Fast model for analysis (cheaper)
   private readonly visionModel = 'gemini-2.0-flash'; // Vision analysis
 
+  // Rate limiter for identity analysis - more conservative since we do batch processing
+  private readonly rateLimiter: RateLimiter;
+
+  // Delay between individual requests within a batch (ms)
+  private readonly REQUEST_DELAY_MS = 2000;
+
   constructor(private configService: ConfigService) {
     this.apiKey = this.configService.get<string>('GOOGLE_GEMINI_API_KEY') || '';
     if (!this.apiKey) {
@@ -141,6 +149,25 @@ export class IdentityAnalysisService {
     } else {
       this.ai = new GoogleGenAI({ apiKey: this.apiKey });
     }
+
+    // Initialize rate limiter with conservative limits for batch processing
+    const maxRpm = this.configService.get<number>('GEMINI_MAX_REQUESTS_PER_MINUTE') || 30;
+    const maxConcurrent = this.configService.get<number>('GEMINI_MAX_CONCURRENT') || 2;
+
+    this.rateLimiter = new RateLimiter({
+      maxRequestsPerMinute: maxRpm,
+      maxConcurrent: maxConcurrent,
+      name: 'IdentityAnalysis',
+    });
+
+    this.logger.log(`Identity analysis rate limiter: ${maxRpm} RPM, ${maxConcurrent} concurrent`);
+  }
+
+  /**
+   * Sleep helper for delays between requests
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   /**
@@ -162,25 +189,43 @@ export class IdentityAnalysisService {
     const analysisPrompt = this.buildAnalysisPrompt();
 
     try {
-      const response = await this.ai.models.generateContent({
-        model: this.visionModel,
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: analysisPrompt },
-              {
-                inlineData: {
-                  mimeType: imageData.mimeType,
-                  data: imageData.base64,
+      // Use rate limiter and retry for resilience against 429 errors
+      const text = await this.rateLimiter.execute(() =>
+        withRetry(
+          async () => {
+            const response = await this.ai!.models.generateContent({
+              model: this.visionModel,
+              contents: [
+                {
+                  role: 'user',
+                  parts: [
+                    { text: analysisPrompt },
+                    {
+                      inlineData: {
+                        mimeType: imageData.mimeType,
+                        data: imageData.base64,
+                      },
+                    },
+                  ],
                 },
-              },
-            ],
+              ],
+            });
+            return response.text || '';
           },
-        ],
-      });
+          {
+            maxRetries: 5,
+            initialDelayMs: 2000,
+            maxDelayMs: 120000,
+            backoffMultiplier: 2,
+            onRetry: (attempt, error, delayMs) => {
+              this.logger.warn(
+                `[IdentityAnalysis] Retry ${attempt}/5 for ${imageUrl.slice(0, 50)}... Error: ${error.message}. Waiting ${Math.round(delayMs / 1000)}s...`,
+              );
+            },
+          },
+        ),
+      );
 
-      const text = response.text || '';
       const analysisTime = Date.now() - startTime;
       this.logger.log(`Image analysis completed in ${analysisTime}ms`);
 
@@ -227,7 +272,7 @@ export class IdentityAnalysisService {
 
   /**
    * Analyze multiple images in batch
-   * Optimized for cost efficiency
+   * Uses sequential processing with delays to avoid rate limits (429 errors)
    */
   async analyzeImages(
     imageUrls: string[],
@@ -235,25 +280,67 @@ export class IdentityAnalysisService {
       maxConcurrency?: number;
       qualityThreshold?: number;
       onProgress?: (completed: number, total: number) => void;
+      delayBetweenRequests?: number;
     } = {},
   ): Promise<ImageAnalysisResult[]> {
-    const { maxConcurrency = 3, qualityThreshold = 0.4, onProgress } = options;
+    const {
+      maxConcurrency = 2, // Reduced from 3 to be more conservative
+      qualityThreshold = 0.4,
+      onProgress,
+      delayBetweenRequests = this.REQUEST_DELAY_MS,
+    } = options;
+
     const results: ImageAnalysisResult[] = [];
     let completed = 0;
+    const total = imageUrls.length;
 
-    // Process in batches to control concurrency
+    this.logger.log(
+      `[IdentityAnalysis] Starting batch analysis of ${total} images (concurrency: ${maxConcurrency}, delay: ${delayBetweenRequests}ms)`,
+    );
+
+    // Process in small batches with delays to avoid rate limits
     for (let i = 0; i < imageUrls.length; i += maxConcurrency) {
+      const batchNum = Math.floor(i / maxConcurrency) + 1;
+      const totalBatches = Math.ceil(imageUrls.length / maxConcurrency);
       const batch = imageUrls.slice(i, i + maxConcurrency);
+
+      this.logger.log(`[IdentityAnalysis] Processing batch ${batchNum}/${totalBatches} (${batch.length} images)`);
+
+      // Process batch with staggered starts to spread load
       const batchResults = await Promise.all(
-        batch.map(async (url) => {
-          const result = await this.analyzeImage(url);
-          completed++;
-          onProgress?.(completed, imageUrls.length);
-          return result;
+        batch.map(async (url, index) => {
+          // Stagger requests within batch
+          if (index > 0) {
+            await this.sleep(index * 500);
+          }
+
+          try {
+            const result = await this.analyzeImage(url);
+            completed++;
+            onProgress?.(completed, total);
+            return result;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error';
+            this.logger.error(`[IdentityAnalysis] Failed to analyze ${url.slice(0, 50)}...: ${message}`);
+            completed++;
+            onProgress?.(completed, total);
+            return this.createFailedResult(url, message);
+          }
         }),
       );
+
       results.push(...batchResults);
+
+      // Add delay between batches if more batches remain
+      if (i + maxConcurrency < imageUrls.length) {
+        this.logger.log(`[IdentityAnalysis] Waiting ${delayBetweenRequests / 1000}s before next batch...`);
+        await this.sleep(delayBetweenRequests);
+      }
     }
+
+    this.logger.log(
+      `[IdentityAnalysis] Batch analysis complete: ${results.filter(r => r.is_valid).length}/${total} valid`,
+    );
 
     // Filter by quality threshold if specified
     return results.map((r) => ({

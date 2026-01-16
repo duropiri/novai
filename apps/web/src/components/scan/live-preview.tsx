@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils';
 import { Video, VideoOff, Wifi, WifiOff } from 'lucide-react';
 
 interface LivePreviewProps {
-  frameData: ArrayBuffer | null;
+  frameData: ArrayBuffer | Uint8Array | null;
   isConnected: boolean;
   phoneConnected: boolean;
   currentAngle?: string;
@@ -35,8 +35,12 @@ export function LivePreview({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Create blob from ArrayBuffer and load as image
-    const blob = new Blob([frameData], { type: 'image/jpeg' });
+    // Create blob from binary data and load as image
+    // Handle both ArrayBuffer and Uint8Array (Socket.io may send either)
+    const blobPart: BlobPart = frameData instanceof ArrayBuffer
+      ? frameData
+      : new Uint8Array(frameData).buffer;
+    const blob = new Blob([blobPart], { type: 'image/jpeg' });
     const url = URL.createObjectURL(blob);
     const img = new Image();
 
@@ -112,14 +116,15 @@ export function LivePreview({
           </div>
         )}
 
-        {/* Canvas for video preview */}
-        <div className="relative aspect-[4/3] bg-muted flex items-center justify-center">
+        {/* Canvas for video preview - 9:16 portrait aspect ratio to match phone camera */}
+        <div className="relative aspect-[9/16] bg-muted flex items-center justify-center max-h-[600px] mx-auto">
           <canvas
             ref={canvasRef}
             className={cn(
-              'max-w-full max-h-full object-contain',
+              'w-full h-full object-contain',
               isStale && 'opacity-50'
             )}
+            style={{ transform: 'scaleX(-1)' }}
           />
 
           {/* Placeholder when no stream */}
