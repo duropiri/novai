@@ -26,6 +26,12 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { loraApi, filesApi, type LoraModel } from '@/lib/api';
 import { processFilesWithZipSupport } from '@/lib/zip-utils';
 import { FaceSelector, type FaceProcessingResult } from '@/components/face-selector';
+import {
+  analyzeAngleCoverage,
+  getAngleDisplayName,
+  type AngleCoverageAnalysis,
+  type FaceAngle,
+} from '@/lib/face-angle-detection';
 
 // Training log entry for persistent storage
 interface TrainingLogEntry {
@@ -128,6 +134,39 @@ export default function LoraCreatorPage() {
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [galleryIndex, setGalleryIndex] = useState(0);
   const PREVIEW_LIMIT = 12; // Max images to show in grid preview
+
+  // Face angle coverage analysis state
+  const [angleCoverage, setAngleCoverage] = useState<AngleCoverageAnalysis | null>(null);
+  const [isAnalyzingAngles, setIsAnalyzingAngles] = useState(false);
+
+  // Analyze face angles when files change
+  useEffect(() => {
+    if (files.length === 0) {
+      setAngleCoverage(null);
+      return;
+    }
+
+    // Don't analyze if style training (no face focus needed)
+    if (isStyle) {
+      setAngleCoverage(null);
+      return;
+    }
+
+    // Debounce the analysis
+    const timeoutId = setTimeout(async () => {
+      setIsAnalyzingAngles(true);
+      try {
+        const analysis = await analyzeAngleCoverage(files);
+        setAngleCoverage(analysis);
+      } catch (error) {
+        console.error('Failed to analyze face angles:', error);
+      } finally {
+        setIsAnalyzingAngles(false);
+      }
+    }, 500);
+
+    return () => clearTimeout(timeoutId);
+  }, [files, isStyle]);
 
   // Load training log from localStorage on mount
   useEffect(() => {
@@ -781,7 +820,7 @@ export default function LoraCreatorPage() {
               Upload 5-20 high-quality face images for best results
             </CardDescription>
             {/* Image Guidelines Panel */}
-            <div className="mt-4 p-3 bg-muted/50 rounded-lg space-y-2">
+            <div className="mt-4 p-3 bg-muted/50 rounded-lg space-y-3">
               <p className="text-sm font-medium">Image Guidelines</p>
               <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
                 <div className="flex items-center gap-1.5 text-green-600 dark:text-green-400">
@@ -815,6 +854,44 @@ export default function LoraCreatorPage() {
                 <div className="flex items-center gap-1.5 text-destructive">
                   <X className="w-3.5 h-3.5 flex-shrink-0" />
                   <span>No blurry photos</span>
+                </div>
+              </div>
+
+              {/* Face Angle Guidance */}
+              <div className="pt-2 border-t border-border/50">
+                <p className="text-sm font-medium mb-2">Recommended Face Angles</p>
+                <p className="text-xs text-muted-foreground mb-2">
+                  Include multiple angles to help the AI learn the 3D structure of the face:
+                </p>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="flex items-center gap-2 p-1.5 bg-background/50 rounded">
+                    <div className="w-6 h-6 rounded-full bg-primary/10 flex items-center justify-center text-primary font-medium">F</div>
+                    <div>
+                      <span className="font-medium">Front</span>
+                      <span className="text-muted-foreground ml-1">(2-4 photos)</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 p-1.5 bg-background/50 rounded">
+                    <div className="w-6 h-6 rounded-full bg-primary/10 flex items-center justify-center text-primary font-medium text-[10px]">3/4</div>
+                    <div>
+                      <span className="font-medium">3/4 Views</span>
+                      <span className="text-muted-foreground ml-1">(2-4 each side)</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 p-1.5 bg-background/50 rounded">
+                    <div className="w-6 h-6 rounded-full bg-primary/10 flex items-center justify-center text-primary font-medium">P</div>
+                    <div>
+                      <span className="font-medium">Profile</span>
+                      <span className="text-muted-foreground ml-1">(1-2 each side)</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 p-1.5 bg-background/50 rounded">
+                    <div className="w-6 h-6 rounded-full bg-muted flex items-center justify-center text-muted-foreground font-medium">+</div>
+                    <div>
+                      <span className="font-medium">Up/Down</span>
+                      <span className="text-muted-foreground ml-1">(optional)</span>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1265,6 +1342,77 @@ export default function LoraCreatorPage() {
                       </button>
                     )}
                   </div>
+
+                  {/* Face Angle Coverage Analysis */}
+                  {!isStyle && (
+                    <div className="mt-3 p-3 bg-muted/50 rounded-lg">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium">Angle Coverage</span>
+                          {isAnalyzingAngles && (
+                            <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
+                          )}
+                        </div>
+                        {angleCoverage && (
+                          <Badge
+                            variant={angleCoverage.score >= 70 ? 'default' : angleCoverage.score >= 40 ? 'secondary' : 'destructive'}
+                            className="text-xs"
+                          >
+                            {angleCoverage.score}% Coverage
+                          </Badge>
+                        )}
+                      </div>
+
+                      {angleCoverage ? (
+                        <div className="space-y-2">
+                          {/* Coverage Bars */}
+                          <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+                            {(['front', 'three_quarter_left', 'three_quarter_right', 'profile_left', 'profile_right'] as FaceAngle[]).map((angle) => {
+                              const count = angleCoverage.coverage[angle];
+                              const maxCount = 4;
+                              const percentage = Math.min(100, (count / maxCount) * 100);
+                              const isGood = count >= (angle === 'front' ? 2 : 1);
+
+                              return (
+                                <div key={angle} className="flex items-center gap-2">
+                                  <span className="w-16 text-muted-foreground truncate">
+                                    {getAngleDisplayName(angle)}
+                                  </span>
+                                  <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
+                                    <div
+                                      className={`h-full rounded-full transition-all ${
+                                        isGood ? 'bg-green-500' : count > 0 ? 'bg-yellow-500' : 'bg-red-500/50'
+                                      }`}
+                                      style={{ width: `${percentage}%` }}
+                                    />
+                                  </div>
+                                  <span className={`w-4 text-right ${isGood ? 'text-green-600' : count > 0 ? 'text-yellow-600' : 'text-muted-foreground'}`}>
+                                    {count}
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+
+                          {/* Recommendations */}
+                          {angleCoverage.recommendations.length > 0 && (
+                            <div className="pt-2 border-t border-border/50 space-y-1">
+                              {angleCoverage.recommendations.map((rec, idx) => (
+                                <div key={idx} className="flex items-start gap-1.5 text-xs text-yellow-600 dark:text-yellow-500">
+                                  <Info className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                                  <span>{rec}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">
+                          {isAnalyzingAngles ? 'Analyzing face angles...' : 'Add images to analyze angle coverage'}
+                        </p>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
